@@ -85,9 +85,11 @@ game folder from the launcher, or from `--game DIR`.
 | `no load` | The load did not finish within 120 s. |
 | `no title`, `no continue`, `warp error` | It never got into the point. |
 | `no stats` | No FPS lines: the build lacks `TLG_FRAME_STATS_MS`. |
+| `wrong scene` | It loaded, but the first scene the game entered is not the point's mission scene (the `landed` column says which one it was). |
 
 Warnings:
-- `mission not seen`: the point's mission scene never started.
+- `mission not seen`: the game logged no scene after the warp.
+- `landed in STAGE SCENE`: the scene it entered instead of the point's.
 - `dark shot`: the screenshot is nearly black.
 
 A status is a hint, not a verdict. Some scenes are dark or fade in late by design, and some load twice

@@ -73,7 +73,7 @@ SKIP = {("s04_FirstAntenna", "_050_SleepingTrico_001"): "curse spell SpellFlashB
         ("s13_FirstFlight", "_020_Care_Start"): "curse spell SpellFlashBack2 in onEnter (FF_c01b_BoyCareStart)",
         ("s13_FirstFlight", "_087_Soldier64_Entry"): "curse spell SpellChant_FF65_01 (FF_f01_Soldier64_Entry)"}
 FIELDS = ["k", "stage", "area", "scene", "status", "warn", "entry", "launch_s", "load_s", "fps", "fps_min", "fps_max",
-          "worst_ms", "compiles", "stalls", "shot", "fade", "mb_s", "top_write", "changed_pct", "missions"]
+          "worst_ms", "compiles", "stalls", "shot", "fade", "mb_s", "top_write", "changed_pct", "missions", "landed"]
 HEAD = ("local ls = loadstring or load\n"
         "local function L(s) local g = ls('--TLGLOG ' .. tostring(s)) if g then g() end end\n")
 # At the title screen: close the QA menu if the level select opened it, make the next LoadCheckPoint load the
@@ -335,6 +335,12 @@ def visit(game, k, stage, area, scene, env):
     row["stalls"] = sum(1 for t, l in game.seen[end:] if t <= stop and l.startswith("Stall:"))
     missions = [l[13:] for _, l in game.seen[seen:] if l.startswith("Lua: mission ") and "_Worker" not in l]
     row["missions"] = " | ".join(missions)
+    # Where the warp landed: the game's own first stage scene after the warp ("Lua: mission <stage> <scene>", logged by
+    # MSCore_L_CallState), not GameFlag, which the warp sets itself. The same helper rule as tlg_lua.cpp: a stage that
+    # starts with "_", or a "sub_" scene, is a helper. A scene may chain on after the load; only the first one counts.
+    landed = next((m for m in missions if " " in m and not m.startswith("_") and not m.split(" ", 1)[1].startswith("sub_")),
+                  None)
+    row["landed"] = landed or ""
     if secs:
         row.update(fps=round(sum(s[0] for s in secs) / len(secs), 1), fps_min=min(s[0] for s in secs),
                    fps_max=max(s[0] for s in secs), worst_ms=max(s[1] for s in secs),
@@ -359,8 +365,12 @@ def visit(game, k, stage, area, scene, env):
         row["status"] = "black"
     elif not secs:
         row["status"] = "no stats"
-    if not any(scene in m for m in missions):
+    if landed != f"{stage} {scene}" and row["status"] in ("ok", "no stats"):
+        row["status"] = "wrong scene"
+    if landed is None:
         warns.append("mission not seen")
+    elif landed != f"{stage} {scene}":
+        warns.append(f"landed in {landed}")
     if 0 <= row["shot"] < 12 and row["status"] == "ok":
         warns.append("dark shot")
     row["warn"] = ", ".join(warns)
