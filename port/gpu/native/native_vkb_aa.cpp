@@ -862,6 +862,12 @@ void Init(const VkbVulkan::Instance& instance_) {
         const bool dlss = Core::Vkb::DlssGlue::Usable(why);
         TlgSettings::ConfigureDlssSupport(dlss, dlss ? nullptr : why.c_str());
         menu_code = MenuCode(); // the start value is not a switch
+        if (asked[0] == '\0') {
+            // TLG_VKB_AA not set (started without the launcher): the menu shows the tlg.ini choice, so run that choice, else the menu says
+            // DLAA while the engine runs off until the row is changed by hand
+            active.store(MenuKind(menu_code, instance_), std::memory_order_relaxed);
+            LOG_INFO(Render_Vulkan, "vkb aa: TLG_VKB_AA not set: the in-game menu's choice ({}) runs", KindName(active.load()));
+        }
     }
 }
 
