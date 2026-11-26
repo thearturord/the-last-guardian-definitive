@@ -6,6 +6,11 @@ The GPU backend (shadPS4 fork, video_core/cache_storage.cpp) keeps it in the por
 saves folder, on every OS):
   <serial>-<recompiler key>/  translated shaders (*.spv, *.meta, *.key, profile.bin) and
                               pipeline-binaries/; other keys of the game are pruned at start;
+  <serial>-recipes/           the shader recipes this player's sessions recorded;
+  <serial>-vkb-shaders/       the new engine's translated shaders (TLG_VKB_SHADER_PREBUILD), one
+                              folder per build and graphics card, others removed at start;
+  <serial>-vkb-recipes/       the new engine's shader recipes (TLG_VKB_SHADER_RECIPES: program code
+                              and the game memory its translation read; never shipped);
   <serial>/, <serial>.zip     older unkeyed layout and the archived form.
 Before, the folder was picked too early: ~/.local/share/shadPS4 on Linux (shadPS4's own folder,
 shared with an installed shadPS4 emulator) and <saves>/user on Windows. The game moves its current

@@ -31,6 +31,7 @@
 #include "core/libraries/kernel/time.h"
 #include "native/shadps4/core/libraries/videoout/driver.h"
 #include "native/shadps4/core/libraries/videoout/videoout_error.h"
+#include "native/native_vkb_shader_store.h"
 
 using VkbVulkan::g_presenter;
 
@@ -305,6 +306,7 @@ void VideoOutDriver::Flip(const Request& req) {
     });
     // Frame rate line, same text start and same window as the normal renderer's ("Frame stats: N FPS, worst
     // frame M ms"), so one reader handles both logs. Only with TLG_FRAME_STATS=1; window TLG_FRAME_STATS_MS.
+    Core::Vkb::ShaderStore::NoteFrame(); // TLG_SHADER_BUILD_STATS=1: the frame time and the shaders translated in it (no-op otherwise)
     static const bool frame_stats = EmulatorSettingsImpl::Flag("TLG_FRAME_STATS", false);
     if (frame_stats) {
         static const double window_s = [] {

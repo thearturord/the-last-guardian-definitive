@@ -52,6 +52,8 @@ void UpdateTextInput(SDL_Window* window);
 void SetLoading(bool active, u32 done, u32 total);
 /// Background cache warm-up: a small corner note while the game runs; `total` 0 hides it.
 void SetBackgroundLoading(u32 done, u32 total);
+/// Background shader build (shader_prebuild): the same corner note; `total` 0 hides it.
+void SetShaderBuild(u32 done, u32 total);
 
 /// Whether anything is drawn this frame (menu open or FPS counter on).
 bool Visible();

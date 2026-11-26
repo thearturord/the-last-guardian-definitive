@@ -1,0 +1,20 @@
+# Pattern B (check run, not a replay of A): a camera circle to the left, then walk right, forward, left, back
+# with camera turns between, a jump (triangle) while walking forward, and a run diagonal at the end.
+0     rx=0
+10    lx=255
+13    rx=255 ry=0
+14.5  ly=0
+16    ly=0 triangle
+16.3  ly=0
+18    rx=0
+19    lx=0
+22    ry=255
+23.5  ly=255
+26.5  rx=255
+28    lx=0 ly=0
+31    lx=0 ly=0 triangle
+31.3  lx=0 ly=0
+33    rx=0 ry=0
+38    rx=255 ry=255
+42
+45

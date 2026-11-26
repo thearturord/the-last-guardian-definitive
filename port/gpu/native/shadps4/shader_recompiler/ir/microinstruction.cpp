@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <atomic>
+#include <cstdlib>
+#include <cstring>
 #include <memory>
 
 #include "native/shadps4/shader_recompiler/ir/basic_block.h"
@@ -9,6 +12,10 @@
 #include "native/shadps4/shader_recompiler/ir/value.h"
 
 namespace VkbShader::IR {
+
+namespace {
+std::atomic<u64> c_slot_misses{0}; ///< TLG_VKB_TRANSLATE_FAST: UseSlotMisses
+}
 
 Inst::Inst(IR::Opcode op_, u32 flags_) noexcept : op{op_}, flags{flags_} {
     if (op == Opcode::Phi) {
@@ -182,10 +189,11 @@ Block* Inst::PhiBlock(size_t index) const {
 }
 
 void Inst::AddPhiOperand(Block* predecessor, const Value& value) {
-    if (auto* inst = value.TryInst()) {
-        Use(inst, phi_args.size());
+    IR::Inst* const inst = value.TryInst(); // read before the list of operands can grow
+    phi_args.emplace_back(predecessor, value); // then the operand, so Use finds its slot
+    if (inst != nullptr) {
+        Use(inst, phi_args.size() - 1);
     }
-    phi_args.emplace_back(predecessor, value);
 }
 
 void Inst::Invalidate() {
@@ -240,13 +248,46 @@ void Inst::ReplaceOpcode(IR::Opcode opcode) {
 
 void Inst::Use(Inst* used, u32 operand) {
     DEBUG_ASSERT(0 == std::count(used->uses.begin(), used->uses.end(), IR::Use(this, operand)));
-    used->uses.emplace_front(this, operand);
+    UseSlot(operand) = used->uses.emplace(used->uses.begin(), this, operand); // at the front, as emplace_front
+    FillSlot(operand, true);
 }
 
 void Inst::UndoUse(Inst* used, u32 operand) {
     IR::Use use(this, operand);
     DEBUG_ASSERT(1 == std::count(used->uses.begin(), used->uses.end(), use));
+    if (FastTranslate()) { // the one node of this use (Use keeps it unique), without searching the list for it
+        // A slot is filled only by Use, with the node of this very use, and emptied here when that node goes, so a filled slot always holds
+        // a live node of this use; the comparison is a second check of that.
+        if (SlotFilled(operand) && *UseSlot(operand) == use) [[likely]] {
+            used->uses.erase(UseSlot(operand));
+            FillSlot(operand, false);
+            return;
+        }
+        // never seen: an empty slot for an argument that is an instruction (an operand set without Use). The old removal, so the result stays
+        // the old one; counted and said once (UseSlotMisses)
+        if (c_slot_misses.fetch_add(1, std::memory_order_relaxed) == 0) {
+            LOG_ERROR(Render_Recompiler, "TLG_VKB_TRANSLATE_FAST: a use was not where its operand said (opcode {}, operand {}); removed by searching the list",
+                      op, operand);
+        }
+        used->uses.remove(use);
+        FillSlot(operand, false);
+        return;
+    }
     used->uses.remove(use);
+}
+
+// ---- TLG_VKB_TRANSLATE_FAST ----
+
+bool FastTranslate() noexcept {
+    static const bool fast = [] {
+        const char* env = std::getenv("TLG_VKB_TRANSLATE_FAST");
+        return env == nullptr || std::strcmp(env, "0") != 0;
+    }();
+    return fast;
+}
+
+u64 UseSlotMisses() noexcept {
+    return c_slot_misses.load(std::memory_order_relaxed);
 }
 
 } // namespace VkbShader::IR

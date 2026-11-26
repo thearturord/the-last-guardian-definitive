@@ -47,6 +47,8 @@ public:
     void DeviceMemoryBarrier();
 
     [[nodiscard]] U32 GetUserData(IR::ScalarReg reg);
+    /// tlg: one float word of the push data (PushData member index, an immediate).
+    [[nodiscard]] F32 TlgPushF32(u32 index);
 
     template <typename T = U32>
     [[nodiscard]] T GetScalarReg(IR::ScalarReg reg);

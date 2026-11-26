@@ -329,6 +329,10 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     : instance{instance_}, scheduler{scheduler_}, liverpool{liverpool_},
       desc_heap{instance, scheduler.GetWorkSemaphore(), DescriptorHeapSizes} {
     sel.regs = &liverpool->regs;
+    // tlg: both cache-lookup switches are fixed at start; their state goes into the log now,
+    // not at the first miss (a run without a miss still shows it).
+    ShaderRecipe::StoreLookup();
+    ShaderRecipe::StoreFill();
     const auto& vk12_props = instance.GetVk12Properties();
     profile = Shader::Profile{
         .max_viewport_width = instance.GetMaxViewportWidth(),
@@ -401,6 +405,9 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .needs_clip_distance_emulation = instance.GetDriverID() == vk::DriverId::eNvidiaProprietary,
         .supports_shader_stencil_export = instance_.IsShaderStencilExportSupported(),
     };
+    // tlg: Extras > Realistic tree shade (leaf_ambient_occlusion_pass.cpp): leaf material entries; strength
+    // and radius are live push data (vk_rasterizer.cpp DispatchRecord).
+    profile.leaf_ao_materials = TlgSettings::LeafAoMaterials();
 
     auto [cache_result, cache] = instance.GetDevice().createPipelineCacheUnique({});
     ASSERT_MSG(cache_result == vk::Result::eSuccess, "Failed to create pipeline cache: {}",
@@ -1367,6 +1374,7 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         }
         info.AddBindings(binding);
         const size_t perm_idx = std::distance(program->modules.begin(), it);
+        program->NoteUse(perm_idx);
         worker.stages.push_back(
             {program, params.hash, hw_stage, info.pgm_base, &info.flattened_ud_buf});
         return std::make_tuple(&info, it->module, it->spec.fetch_shader_data,
@@ -1389,6 +1397,14 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         std::unique_lock lock{programs_mutex};
         program_cache.erase(it_pgm);
         it_pgm = program_cache.end();
+    }
+    if (it_pgm == program_cache.end()) {
+        // tlg: TLG_SHADER_STORE_LOOKUP: a program no pipeline key loaded may still be in the
+        // shader cache (the shader list's prebuild); its permutations count like loaded ones.
+        if (auto stored = LoadStoredProgram(params.hash, hw_stage)) {
+            std::unique_lock lock{programs_mutex};
+            it_pgm = program_cache.emplace(params.hash, std::move(stored)).first;
+        }
     }
     if (it_pgm == program_cache.end()) {
         auto new_program = std::make_unique<Program>(hw_stage, sw_stage, params);
@@ -1461,6 +1477,18 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
                                     program->failed_permutations.end()) {
             return {};
         }
+        // tlg: TLG_SHADER_STORE_FILL: the cache may hold it (the shader list's prebuild writes
+        // every permutation of a program, the keys load only those they name).
+        if (FillStoredPermutations(*program, params.hash, hw_stage)) {
+            it = std::ranges::find(program->modules, spec, &Program::Module::spec);
+            if (it != program->modules.end()) {
+                program->last_used = std::distance(program->modules.begin(), it);
+            }
+            perm_idx = program->modules.size();
+            perm_hash = HashCombine(params.hash, perm_idx);
+        }
+    }
+    if (it == program->modules.end()) {
         if (compile_async) {
             QueueShader(*program, hw_stage, sw_stage, params, runtime_info, binding, perm_idx, false,
                         std::move(spec));
@@ -1477,6 +1505,7 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         module = it->module;
         perm_idx = std::distance(program->modules.begin(), it);
         perm_hash = HashCombine(params.hash, perm_idx);
+        program->NoteUse(perm_idx);
     }
     return std::make_tuple(&program->info, module,
                            program->modules[perm_idx].spec.fetch_shader_data, perm_hash);

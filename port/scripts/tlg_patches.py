@@ -31,7 +31,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mod_patches
 
-TITLE_IDS = {'CUSA03627', 'CUSA03745', 'CUSA04936', 'CUSA04943'}   # US, EU, KR, CN (tlg_run.py LANGUAGES_BY_TITLE)
+TITLE_IDS = {'CUSA03627', 'CUSA03745', 'CUSA04936', 'CUSA04937', 'CUSA04943'}   # US, EU, KR, Asia (untested), CN (tlg_run.py LANGUAGES_BY_TITLE)
 SELF_MAGIC = b'O\x15=\x1d'
 TEXT_FILE_OFFSET = 0x4000      # PT_LOAD 0 (R E): file offset of vaddr 0
 TEXT_SIZE = 0x16b2d5c

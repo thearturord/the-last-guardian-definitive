@@ -389,6 +389,19 @@ size_t DataBase::CountBlobs(BlobType type) {
     return count;
 }
 
+bool DataBase::Has(BlobType type, const std::string& name) const {
+    if (!opened) {
+        return false;
+    }
+    if (EmulatorSettings.IsPipelineCacheArchived()) {
+        return true;
+    }
+    auto path = cache_path / name;
+    path.replace_extension(GetBlobFileExtension(type));
+    std::error_code error;
+    return std::filesystem::is_regular_file(path, error);
+}
+
 bool DataBase::ConcurrentReads() const {
     return !EmulatorSettings.IsPipelineCacheArchived();
 }

@@ -118,10 +118,14 @@ int main(void) {
 @unittest.skipUnless(os.name == 'nt', 'Windows exception handling only')
 class WindowsFaultRecoveryTest(unittest.TestCase):
     def test_speculative_fault_recovers_before_gpu_readback(self):
-        compiler = os.environ.get('TLG_TEST_CLANG') or shutil.which('clang')
-        local = ROOT / 'out/native-tools/msys64/clang64/bin/clang.exe'
-        if not compiler and local.is_file():
-            compiler = str(local)
+        # The MSYS2 CLANG64 clang first: a clang on PATH may be Visual Studio's, which targets the
+        # MSVC runtime and fails -Werror on its deprecated getenv.
+        compiler = os.environ.get('TLG_TEST_CLANG')
+        for local in (ROOT / 'out/native-tools/msys64/clang64/bin/clang.exe',
+                      Path(os.environ.get('MSYS2_ROOT', 'C:/msys64')) / 'clang64/bin/clang.exe'):
+            if not compiler and local.is_file():
+                compiler = str(local)
+        compiler = compiler or shutil.which('clang')
         if not compiler:
             self.skipTest('MSYS2 CLANG64 compiler unavailable; set TLG_TEST_CLANG')
         source = (ROOT / 'src/probe.c').read_text(encoding='utf-8')

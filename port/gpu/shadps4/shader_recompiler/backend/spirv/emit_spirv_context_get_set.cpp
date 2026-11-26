@@ -46,6 +46,11 @@ static std::pair<Id, bool> OutputAttrComponentType(EmitContext& ctx, IR::Attribu
     }
 }
 
+Id EmitTlgPushF32(EmitContext& ctx, u32 index) {
+    return ctx.OpLoad(ctx.F32[1], ctx.OpAccessChain(ctx.TypePointer(spv::StorageClass::PushConstant, ctx.F32[1]),
+                                                     ctx.push_data_block, ctx.ConstU32(index)));
+}
+
 Id EmitGetUserData(EmitContext& ctx, IR::ScalarReg reg) {
     const u32 index = ctx.binding.user_data + ctx.info.ud_mask.Index(reg);
     const u32 half = PushData::UdRegsIndex + (index >> 2);

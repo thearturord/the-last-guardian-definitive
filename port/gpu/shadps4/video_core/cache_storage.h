@@ -60,6 +60,10 @@ public:
     /// tlg: `stop` returning true ends the walk early (background warm-up at exit).
     void ForEachBlob(BlobType type, const std::function<void(std::vector<u8>&& data)>& func,
                      const std::function<bool()>& stop = {});
+    /// tlg: whether a blob of that name is there, without opening it (plain files only: the
+    /// archive answers true and Load decides). A probe for a blob that may well be missing
+    /// asks this first, so the miss is no failed-open line in the log.
+    [[nodiscard]] bool Has(BlobType type, const std::string& name) const;
     /// tlg: blobs are plain files written beside and renamed into place, so other threads
     /// may read them while the IO thread saves (the zip archive cannot).
     [[nodiscard]] bool ConcurrentReads() const;

@@ -1,0 +1,17 @@
+# Pattern A (shader list recording): a full camera circle to the right, then walk about 3 s each way
+# (forward, right, back, left) with a short camera turn between. Sticks: 0..255, 128 = middle; ly=0 = forward.
+0     rx=255
+10    ly=0
+13    rx=0
+14    lx=255
+17    rx=255
+18    ly=255
+21    rx=0
+22    lx=0
+25    ry=0
+26.5  ry=255
+28    lx=255 ly=0
+31    rx=255 ry=0
+36    rx=0 ry=255
+41
+45

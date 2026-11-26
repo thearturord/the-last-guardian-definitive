@@ -21,8 +21,9 @@ GROUPS = {  # background: inner, outer colour
     'play': ((235, 120, 110), (70, 20, 30)),
     'rest': ((120, 130, 235), (20, 22, 70)),
     'tummy': ((150, 200, 80), (25, 50, 10)),
-    'e3': ((214, 120, 230), (45, 15, 70)),     # Marketing / E3 poses
+    'sealed': ((214, 120, 230), (45, 15, 70)), # Sealed moves (cut or marketing only)
     'maybe': ((150, 150, 160), (30, 30, 38)),  # May not work: plain stone grey
+    'unique': ((255, 236, 140), (140, 96, 0)),   # gold: our own recreated moves (UniqueHelp), in the Sealed group
 }
 INK = (255, 248, 230, 255)
 SHADOW = (0, 0, 0, 150)
@@ -383,6 +384,27 @@ def draw(name, p):
         p.circle(54, 46, 22, fill=False, w=6)
         p.arc(54, 46, 13, 200, 340, 4); p.arc(54, 46, 13, 20, 160, 4); p.line([(36, 34), (72, 58)], 4)
         p.line([(34, 62), (24, 74), (36, 82), (16, 88)], 4)
+    elif name == 'tlg_foxtail':  # a foxtail grass stalk: a bent stem, a fuzzy nodding head, one leaf
+        p.line([(30, 90), (32, 66), (38, 44), (50, 28), (60, 22)], 5)
+        p.line([(33, 64), (22, 52), (14, 46)], 4)
+        head = [(60, 22), (68, 22), (75, 26), (80, 33), (82, 42)]
+        for i in range(len(head) - 1):
+            p.line([head[i], head[i + 1]], 12)
+        for i, (x, y) in enumerate(head):
+            for a in (-60, -20, 20, 60, 100, 140, 180, 220):
+                r = math.radians(a + i * 17)
+                p.line([(x, y), (x + math.cos(r) * 10, y + math.sin(r) * 10)], 2.5)
+    elif name == 'tlg_foxtail_play':  # the foxtail toy waved, a paw reaching for its head
+        p.line([(70, 90), (68, 68), (60, 48), (48, 34)], 4)
+        head = [(48, 34), (40, 28), (32, 26), (24, 28)]
+        for i in range(len(head) - 1):
+            p.line([head[i], head[i + 1]], 9)
+        for i, (x, y) in enumerate(head):
+            for a in (-60, -20, 20, 60, 100, 140, 180, 220):
+                r = math.radians(a + i * 17)
+                p.line([(x, y), (x + math.cos(r) * 7, y + math.sin(r) * 7)], 2)
+        p.arc(84, 22, 8, 100, 200, 3); p.arc(84, 22, 14, 100, 200, 3)
+        p.paw(28, 70, 0.7)
     elif name == 'roll_in_nose':  # a nose with a roll around it
         nose(p, 48, 52); p.arc(48, 52, 30, 30, 320, 6); p.arrow(74, 34, 76, 52, 6, 12)
     elif name == 'smell':  # nostrils and scent
@@ -445,18 +467,18 @@ def works(header):
     """Every move (command, group) from tlg_fun.h, in menu order (all groups, May not work too)."""
     out, group = [], None
     names = {'Sounds and moods': 'sound', 'Body': 'body', 'Play': 'play', 'Tummy': 'tummy', 'Rest': 'rest',
-             'Marketing / E3 poses': 'e3', 'MayNotWork': 'maybe'}
+             'Sealed': 'sealed', 'MayNotWork': 'maybe'}
     text = open(header, encoding='utf-8').read()
     text = text[text.index('Actions[] = {'):]
     text = text[:text.index('};')]
-    for m in re.finditer(r'\{(nullptr|"[^"]*"), ("[^"]*"|MayNotWork)', text):
+    for m in re.finditer(r'\{(nullptr|"[^"]*"), ("[^"]*"|MayNotWork|Sealed)[^}]*', text):
         cmd, name = m.group(1), m.group(2).strip('"')
         if cmd == 'nullptr':
             if name not in names:
                 break
             group = names[name]
             continue
-        out.append((cmd.strip('"'), group))
+        out.append((cmd.strip('"'), 'unique' if 'UniqueHelp' in m.group(0) else group))
     return out
 
 

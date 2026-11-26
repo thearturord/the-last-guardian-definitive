@@ -94,12 +94,14 @@ class RoundTripTests(Base):
         states = {i.id: None for i in backports_table.ITEMS}
         self.assertEqual(gfxlogic.matching_preset(settings, states), gfxlogic.DEFAULT_PRESET)
         self.assertEqual(backports_table.environment(states), {})
-        gfxlogic.apply_targets(settings, states, gfxlogic.preset_targets('quality'))
-        self.assertEqual(states['menu:smaa'], '1')
-        self.assertEqual(gfxlogic.matching_preset(settings, states), 'quality')
-        for preset_id in ('balanced', 'performance', 'ps4'):
+        # Quality sets the same keys as Balanced since SMAA left the presets: PS4 is the one that
+        # sets an item (the 30 FPS limit), so it is the one the others must undo.
+        for preset_id in ('balanced', 'performance'):
+            gfxlogic.apply_targets(settings, states, gfxlogic.preset_targets('ps4'))
+            self.assertEqual(states['menu:fps_limit'], '30')
+            self.assertEqual(gfxlogic.matching_preset(settings, states), 'ps4')
             gfxlogic.apply_targets(settings, states, gfxlogic.preset_targets(preset_id))
-            self.assertIsNone(states['menu:smaa'], preset_id)
+            self.assertIsNone(states['menu:fps_limit'], preset_id)
             self.assertEqual(gfxlogic.matching_preset(settings, states), preset_id)
 
     def test_export_then_read_gives_the_same_values(self):
@@ -121,12 +123,12 @@ class RoundTripTests(Base):
 
     def test_a_built_in_preset_exports_and_matches_again(self):
         settings, states = dict(DEFAULTS), {i.id: None for i in backports_table.ITEMS}
-        gfxlogic.apply_targets(settings, states, gfxlogic.preset_targets('quality'))
+        gfxlogic.apply_targets(settings, states, gfxlogic.preset_targets('ps4'))
         preset, problems = preset_share.parse_preset(preset_share.export_preset(settings, states, 'c'))
         self.assertEqual(problems, [])
         other_settings, other_states = dict(DEFAULTS), {i.id: None for i in backports_table.ITEMS}
         preset_share.apply_preset(preset, other_settings, other_states)
-        self.assertEqual(gfxlogic.matching_preset(other_settings, other_states), 'quality')
+        self.assertEqual(gfxlogic.matching_preset(other_settings, other_states), 'ps4')
 
     def test_diff_lists_only_what_changes_and_texts_render(self):
         preset, _ = preset_share.parse_preset(self.valid(items={'menu:smaa': '1', 'menu:color_contrast': '1.3'},

@@ -69,6 +69,7 @@ class ResolutionTests(Temp):
         self.assertEqual({'backup_keep': 5}, userdata.read_pointer(path))
         self.assertEqual({}, userdata.read_pointer(self.root / 'missing.json'))
 
+    @unittest.skipIf(os.name == 'nt', 'Linux only')
     def test_real_pointer_through_environment(self):
         env = {'XDG_CONFIG_HOME': str(self.root / 'xdg')}
         with mock.patch.dict(os.environ, env, clear=False), mock.patch.object(userdata.os, 'name', 'posix'):

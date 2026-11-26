@@ -1923,6 +1923,8 @@ void Rasterizer::DispatchRecord(const ComputePipeline* pipeline) {
 
     scheduler.EndRendering();
     mark();
+    // tlg: leaf shading, live (the viewport words are unused by compute shaders).
+    TlgSettings::LeafAoLive(push_data.xoffset, push_data.yoffset);
     pipeline->BindResources(set_writes, push_data);
 
     const vk::Pipeline handle = pipeline->Handle();
@@ -1977,6 +1979,7 @@ void Rasterizer::DispatchIndirectRecord(const ComputePipeline* pipeline, VAddr a
     }
 
     scheduler.EndRendering();
+    TlgSettings::LeafAoLive(push_data.xoffset, push_data.yoffset); // tlg: leaf shading, live
     pipeline->BindResources(set_writes, push_data);
 
     const vk::Pipeline handle = pipeline->Handle();

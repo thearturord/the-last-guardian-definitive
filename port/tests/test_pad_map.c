@@ -79,5 +79,28 @@ int main(void) {
     ButtonMap gp=pad_map;
     assert(apply_button_map(&gp,"cross=a|b",false)==1);
     assert(pressed_by(&gp,SDL_GAMEPAD_BUTTON_SOUTH)==BTN_CROSS && pressed_by(&gp,SDL_GAMEPAD_BUTTON_EAST)==(BTN_CROSS|BTN_CIRCLE));
+    /* Issue #104: movement, camera and motion keys are in the keyboard map too. ESDF moves, W
+     * is free for a button and no longer moves; the gamepad map does not take these names. */
+    assert(pressed_by(&key_map,SDL_SCANCODE_W)==KEY_MOVE_UP && pressed_by(&key_map,SDL_SCANCODE_LEFT)==KEY_CAM_LEFT);
+    assert(pressed_by(&key_map,SDL_SCANCODE_T)==KEY_TILT_RIGHT && pressed_by(&key_map,SDL_SCANCODE_Y)==KEY_SHAKE);
+    ButtonMap move=key_map;
+    assert(apply_button_map(&move,"move_up=E,move_down=D,move_left=S,move_right=F,square=W,r2=A,camera_left=Keypad 4,shake=none",true)==8);
+    assert(pressed_by(&move,SDL_SCANCODE_E)==KEY_MOVE_UP && pressed_by(&move,SDL_SCANCODE_D)==KEY_MOVE_DOWN);
+    assert(pressed_by(&move,SDL_SCANCODE_S)==KEY_MOVE_LEFT && pressed_by(&move,SDL_SCANCODE_F)==KEY_MOVE_RIGHT);
+    assert(pressed_by(&move,SDL_SCANCODE_W)==BTN_SQUARE && pressed_by(&move,SDL_SCANCODE_A)==BTN_R2);
+    assert(pressed_by(&move,SDL_SCANCODE_KP_4)==KEY_CAM_LEFT && pressed_by(&move,SDL_SCANCODE_LEFT)==0);
+    assert(pressed_by(&move,SDL_SCANCODE_Y)==0 && pressed_by(&move,SDL_SCANCODE_RIGHT)==KEY_CAM_RIGHT);
+    ButtonMap gp2=pad_map;
+    assert(apply_button_map(&gp2,"move_up=a",false)==0 && gp2.count==pad_map.count);
+    /* What is held: the actions stay apart from the PS4 buttons. */
+    static bool held[SDL_SCANCODE_COUNT];
+    const ButtonMap saved=key_map;
+    key_map=move;
+    held[SDL_SCANCODE_E]=held[SDL_SCANCODE_W]=true;
+    assert(key_map_pressed(held,0)==(KEY_MOVE_UP|BTN_SQUARE));
+    assert(key_map_pressed(held,1u<<(MOUSE_LEFT-MOUSE_SOURCE))==(KEY_MOVE_UP|BTN_SQUARE|BTN_TRIANGLE));
+    assert(key_map_pressed(NULL,0)==0);
+    key_map=saved;
+    assert((KEY_ACTIONS & (BTN_TOUCHPAD|CLICK_LEFT|CLICK_RIGHT|0xffff))==0);
     puts("PASS: pad and key maps");
 }

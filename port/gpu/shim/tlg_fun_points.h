@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// tlg: start points of the level jump (Fun tab, TLG_START_POINT): every StartAreas entry of the story
+// tlg: start points of the level jump (Extras tab, TLG_START_POINT): every StartAreas entry of the story
 // stages; made by tools/scene-check/start_points_gen.py from scenes.json (same list and order as the scene check).
 #pragma once
 

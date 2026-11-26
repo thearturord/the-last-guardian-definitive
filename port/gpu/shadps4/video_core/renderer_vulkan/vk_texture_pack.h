@@ -65,12 +65,19 @@ private:
         vk::Format format = vk::Format::eBc7UnormBlock; ///< BC5 for normal maps
         u64 bytes = 0;
         u32 last_used = 0; ///< `now` of the last binding; unused images are freed after a while
+        u32 retry_at = 0;  ///< `now` from which an Unloaded entry may load again (no room before)
         std::vector<std::pair<std::pair<bool, vk::ComponentMapping>, vk::UniqueImageView>> views;
     };
     void Switch(int pack);
-    void Upload(Entry& entry);
+    void Upload(Entry& entry, bool limited = true);
     void Worker(std::stop_token stop);
     void Evict();
+    /// Frees one pack image once the GPU is done with it.
+    void Free(Entry& entry);
+    /// Once a second with a pack on: how much more the pack may load (`room`), from the video
+    /// memory the driver reports free; frees the least recently used pack images when the game
+    /// needs the memory back.
+    void UpdateRoom();
     void XboxPad();
     vk::ImageView View(Entry& entry, const VideoCore::Image& image,
                        const VideoCore::ImageViewInfo& info);
@@ -82,6 +89,8 @@ private:
     u64 generation = 1;
     u64 resident_bytes = 0;
     u64 hits = 0, misses = 0, refused = 0, last_report = 0;
+    u64 room = 0;               ///< bytes the pack may still load (UpdateRoom)
+    u64 no_room = 0, shed = 0;  ///< loads put off for lack of room, images freed for the game
     const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
     u32 now = 0; ///< seconds since start, updated by Tick
     std::unordered_map<u64, std::shared_ptr<Entry>> entries;

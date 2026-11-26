@@ -22,6 +22,7 @@
 #include "common/types.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 #include "video_core/renderer_vulkan/vk_dlss.h"
+#include "video_core/renderer_vulkan/vk_xess.h"
 #include "video_core/renderer_vulkan/vk_fsr4.h"
 #include "video_core/texture_cache/image.h"
 
@@ -236,6 +237,23 @@ private:
     bool RecordDlss(vk::CommandBuffer cmdbuf, const Dlss::Resource& color,
                     const Dlss::Resource& depth, u32 w, u32 h, u32 ow, u32 oh, float frame_ms,
                     bool hdr, std::array<float, 2> frame_jitter);
+    /// tlg: XeSS selected and libxess.dll is ready (Windows).
+    [[nodiscard]] bool UseXess() const;
+    /// Records XeSS into `cmdbuf` (same inputs and output as DLSS; layouts handled here).
+    bool RecordXess(vk::CommandBuffer cmdbuf, const Dlss::Resource& color,
+                    const Dlss::Resource& depth, u32 w, u32 h, u32 ow, u32 oh, bool hdr,
+                    std::array<float, 2> frame_jitter);
+    /// DLSS or XeSS: the two ML upscalers share every call site (own context, RCAS after).
+    [[nodiscard]] bool UseMl() const {
+        return UseDlss() || UseXess();
+    }
+    bool RecordMl(vk::CommandBuffer cmdbuf, const Dlss::Resource& color,
+                  const Dlss::Resource& depth, u32 w, u32 h, u32 ow, u32 oh, float frame_ms,
+                  bool hdr, std::array<float, 2> frame_jitter) {
+        return UseXess() ? RecordXess(cmdbuf, color, depth, w, h, ow, oh, hdr, frame_jitter)
+                         : RecordDlss(cmdbuf, color, depth, w, h, ow, oh, frame_ms, hdr,
+                                      frame_jitter);
+    }
     /// Records FSR 4 into output_image; on a permanent failure FSR 3 takes over.
     bool RecordFsr4(vk::CommandBuffer cmdbuf, Fsr4Upscaler::Image color, Fsr4Upscaler::Image depth,
                     u32 w, u32 h, u32 ow, u32 oh, float frame_ms, std::array<float, 2> frame_jitter);
@@ -377,6 +395,7 @@ private:
     std::unique_ptr<Fsr4Upscaler> fsr4;
     bool fsr4_failed = false;
     bool dlss_failed = false;
+    bool xess_failed = false;
     bool fg_pending = false;
     bool fg_reset = false;
     std::array<float, 2> fg_jitter{};

@@ -1,4 +1,4 @@
-"""Writes the start point lists of the level jump from scenes.json (made by points.py): the in-game menu's Fun tab
+"""Writes the start point lists of the level jump from scenes.json (made by points.py): the in-game menu's Extras tab
 (gpu/shim/tlg_fun_points.h) and the launcher's Start at... page (launcher/start_points.py). Run it after scenes.json
 changes: python start_points_gen.py"""
 import json, os
@@ -9,7 +9,7 @@ points = json.load(open(os.path.join(HERE, "scenes.json"), encoding="utf-8"))
 note = "made by tools/scene-check/start_points_gen.py from scenes.json (same list and order as the scene check)"
 
 c = ["// SPDX-License-Identifier: GPL-2.0-or-later",
-     "// tlg: start points of the level jump (Fun tab, TLG_START_POINT): every StartAreas entry of the story",
+     "// tlg: start points of the level jump (Extras tab, TLG_START_POINT): every StartAreas entry of the story",
      f"// stages; {note}.", "#pragma once", "", "namespace TlgFun {", "struct Point {", "    const char* stage;",
      "    const char* area;", "    const char* scene;", "};", "", "inline constexpr Point Points[] = {"]
 c += [f'    {{"{p["stage"]}", "{p["area"]}", "{p["scene"]}"}},' for p in points]

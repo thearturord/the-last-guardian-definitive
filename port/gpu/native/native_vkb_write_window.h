@@ -33,6 +33,7 @@ struct Window {
     bool guard_immediate{};
     bool guard_signed{};
     u32 guard_binding{~0u}, guard_index{}, guard_value{};
+    bool operator==(const Window&) const = default; ///< tlg: the shader store's check mode compares translations
 };
 
 /// One entry per buffer binding of `info` (same order); `local_x` is the work group size in x

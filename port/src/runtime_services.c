@@ -533,17 +533,73 @@ static ABI int32_t ime_result(uint32_t *result) {
 }
 static ABI int32_t ime_term(void) { memset(&ime,0,sizeof(ime)); return 0; }
 
-/* ---- Trophies: accepted locally, recorded in the log ---- */
+/* ---- Trophies (issue #60): kept in user/trophies.txt, pop-up and list in the in-game menu ----
+ * The trophy file (/app0/sce_sys/trophy/trophy00.trp, also inside a .zar) goes to the GPU side
+ * once, at the first context. TLG_TROPHY_TEST=next (or a trophy number, 1 = the first) unlocks
+ * one 20 s later through the same path, into user/trophies_test.txt: the real list stays clean. */
+static void *read_guest_file(const char *path,uint64_t *size) {
+    *size=0;
+    int64_t fd=runtime_file_open(path,0,0);
+    if (fd<0) return NULL;
+    uint64_t cap=1<<16, used=0;
+    unsigned char *data=malloc(cap);
+    while (data) {
+        if (used==cap) {
+            unsigned char *bigger=realloc(data,cap*2);
+            if (!bigger) { free(data); data=NULL; break; }
+            data=bigger; cap*=2;
+        }
+        int64_t n=runtime_file_read((int)fd,data+used,cap-used);
+        if (n<=0) break;
+        used+=(uint64_t)n;
+    }
+    runtime_file_close((int)fd);
+    *size=data ? used : 0;
+    return data;
+}
+static int trophy_report(int id,const char *how) {
+    int fresh=tlggpu_trophy_unlock(id);
+    printf("Runtime: trophy %d unlocked%s%s\n",id,how,fresh ? "" : " (already unlocked)");
+    return fresh;
+}
+static void *trophy_test_thread(void *arg) {
+    int id=(int)(intptr_t)arg;
+    struct timespec wait={20,0};
+    nanosleep(&wait,NULL);
+    if (id<0) id=tlggpu_trophy_next_locked();
+    if (id<0) printf("Trophies: test unlock: every trophy is unlocked already\n");
+    else trophy_report(id," (test)");
+    return NULL;
+}
+static void trophy_setup(void) {
+    const char *test=getenv("TLG_TROPHY_TEST");
+    char store[1024];
+    snprintf(store,sizeof(store),"%s/%s",runtime_file_user_dir(),test && *test ? "trophies_test.txt" : "trophies.txt");
+    uint64_t trp_size=0, np_size=0;
+    void *trp=read_guest_file("/app0/sce_sys/trophy/trophy00.trp",&trp_size);
+    void *np=read_guest_file("/app0/sce_sys/npbind.dat",&np_size);
+    if (!trp) printf("Trophies: no sce_sys/trophy/trophy00.trp in the game files: unlocks are kept, no icons\n");
+    tlggpu_trophy_setup(trp,trp_size,np,np_size,store,language());
+    free(trp); free(np);
+    if (test && *test) {
+        intptr_t id=strcmp(test,"next")==0 ? -1 : atoi(test)-1;
+        pthread_t thread;
+        if (id>=-1 && pthread_create(&thread,NULL,trophy_test_thread,(void *)id)==0) pthread_detach(thread);
+    }
+}
+static pthread_once_t trophy_once=PTHREAD_ONCE_INIT;
 static ABI int32_t trophy_context(int32_t *ctx,int32_t user,uint32_t label,uint64_t options) {
     (void)user; (void)label; (void)options;
     if (!ctx) return TROPHY_INVALID;
+    pthread_once(&trophy_once,trophy_setup);
     *ctx=new_id(); return 0;
 }
 static ABI int32_t trophy_handle(int32_t *handle) { if (!handle) return TROPHY_INVALID; *handle=new_id(); return 0; }
 static ABI int32_t trophy_register(int32_t ctx,int32_t handle,uint64_t options) { (void)ctx; (void)handle; (void)options; return 0; }
 static ABI int32_t trophy_unlock(int32_t ctx,int32_t handle,int32_t id,int32_t *platinum) {
     (void)ctx; (void)handle;
-    printf("Runtime: trophy %d unlocked\n",id);
+    pthread_once(&trophy_once,trophy_setup);
+    trophy_report(id,"");
     if (platinum) *platinum=-1;
     return 0;
 }
@@ -556,11 +612,15 @@ static ABI int32_t trophy_game_info(int32_t ctx,int32_t handle,void *details,voi
 static ABI int32_t trophy_info(int32_t ctx,int32_t handle,int32_t id,void *details,void *data) {
     (void)id; return trophy_game_info(ctx,handle,details,data);
 }
-/* Nothing is unlocked on this console: an empty 128-trophy flag set. */
+/* The unlocked ones from user/trophies.txt (128-trophy flag set), as a console would report. */
 static ABI int32_t trophy_unlock_state(int32_t ctx,int32_t handle,uint32_t *flags,uint32_t *count) {
     if (!flags || !count) return TROPHY_INVALID;
     if (ctx<=0 || handle<=0) return TROPHY_INVALID;
-    memset(flags,0,16); *count=0;
+    pthread_once(&trophy_once,trophy_setup);
+    uint32_t bits[4];
+    tlggpu_trophy_flags(bits);
+    memcpy(flags,bits,16);
+    *count=(uint32_t)tlggpu_trophy_count(); /* trophies in the set (0 without the file, as before) */
     return 0;
 }
 static ABI int32_t trophy_release(int32_t id) { return id>0 ? 0 : TROPHY_INVALID; }

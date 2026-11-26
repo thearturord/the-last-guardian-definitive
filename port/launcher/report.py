@@ -489,11 +489,14 @@ def issue_url(title, body, short_body, base=ISSUES_URL):
     return url, True
 
 
-def write_zip(path, report_text, log_text, log_name):
+def write_zip(path, report_text, log_text, log_name, disc_text=None):
     """Saves report.md + the redacted log in a .zip. The log is stored under its own name with
-    a '.redacted.log' ending so nobody mistakes it for the original."""
+    a '.redacted.log' ending so nobody mistakes it for the original. disc_text (disc_check.py:
+    checksums of the game files, no paths) goes in as disc-check.txt."""
     stem = Path(log_name).stem if log_name else 'log'
     with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as z:
         z.writestr('report.md', report_text)
         if log_text is not None:
             z.writestr(f'{stem}.redacted.log', log_text)
+        if disc_text:
+            z.writestr('disc-check.txt', disc_text)

@@ -54,7 +54,17 @@ static void isa_report_hook(void) { isa_rewrite_report(isa_table, stdout); }
 int vulkan_smoke(void);
 /* tlg: shader recipes, gpu/shadps4/video_core/renderer_vulkan/shader_recipe.cpp */
 int tlg_import_shaders(const char *cache_dir, const char *recipe_dir);
+int tlg_import_shaders_list(const char *cache_dir, const char *recipe_dir, const char *list, const char *game_dir, unsigned part, unsigned parts);
+/* New engine (TLG_VKB_SHADER_RECIPES): fills the store folder STORE (cache/<serial>-vkb-shaders/<id>) from the recipes of RECIPES. */
+int tlg_vkb_build_store(const char *store_folder, const char *recipe_dir);
+int tlg_vkb_build_list(const char *store_folder, const char *list, const char *game_dir, unsigned part, unsigned parts);
+/* Test tool: compares the stages of two store folders member by member (issue 160 step 2b). */
+int tlg_vkb_compare_stores(const char *dir_a, const char *dir_b);
 int tlg_compare_meta(const char *dir_a, const char *dir_b);
+int tlg_same_permutation(const char *dir_a, const char *dir_b);
+int tlg_portable_recipes(const char *recipe_dir, const char *out);
+int tlg_keys_from_portable(const char *dir);
+int tlg_prebuild(const char *cache_dir, const char *recipe_dir, const char *list, const char *game_dir, unsigned jobs);
 
 static void fail(const char *message) { fprintf(stderr, "ERROR: %s\n", message); exit(1); }
 static uint64_t read64(FILE *f) {
@@ -987,7 +997,106 @@ mismatch:
  * Root cause (results arriving long after their pool is freed) is tracked in #94. */
 static const char *const async_guard_sites[5] = {"0xc4cdc4", "0xc4d62f", "0xc4d8a9", "0xc4a3b5", "0xc4afc5"};
 static int64_t async_guard_skips[5];
-static ABI void async_guard_note(uint64_t site) {
+/* async guard detail (log only, no behaviour change): what a skip note shows, to tell a pool freed a few frames
+ * before (area unload, reload, mission change) from compute results that arrive late. Every stub
+ * pushes the game's registers in this order before it calls the note; rsp is the game's rsp at
+ * the site. Where each site keeps its record (read from the game code at the five sites):
+ *   0 0xc4cdc4: table rcx, index rax, pool list [rbp-0x520], record r12+r14 (0x90 bytes, index at +0x80)
+ *   1 0xc4d62f: table rax, index rcx, pool list rdx, record rbx + 40 * ([rbp-0x550])[r13] (index at +0x24)
+ *   2 0xc4d8a9: table rdx, index rax, pool list [rbp-0x4f8], record r12 (0x30 bytes, index at +0x28)
+ *   3 0xc4a3b5: table rdx, index [rsp+0xa0], pool list [rsp+0xc0]; a walk over every pool, no record
+ *   4 0xc4afc5: table rcx, index rax, pool list [rsp+0x98]; a walk over every pool, no record
+ * A pool list is {table, 32-bit count}. Every read goes through async_guard_peek, which cannot fault:
+ * a wrong guess here costs a line that says "unreadable", never the game. */
+struct async_guard_regs { uint64_t rax, rcx, rdx, rbx, rbp, r12, r13, r14; };
+static int async_guard_detail = 1;   /* TLG_ASYNC_GUARD_DETAIL=0: only the "skipped" line, as before */
+void tlg_compute_state(char *out, size_t size);   /* liverpool.cpp: slowest compute times, open work */
+static size_t async_guard_peek(void *to, uint64_t from, size_t size) {
+#ifdef _WIN32
+    SIZE_T got = 0;
+    return ReadProcessMemory(GetCurrentProcess(), (const void *)(uintptr_t)from, to, size, &got) ? (size_t)got : 0;
+#else
+    struct iovec lo = {to, size}, ro = {(void *)(uintptr_t)from, size};
+    const ssize_t got = process_vm_readv(getpid(), &lo, 1, &ro, 1, 0);
+    return got > 0 ? (size_t)got : 0;
+#endif
+}
+static uint64_t async_guard_u64(uint64_t from, int *ok) {
+    uint64_t v = 0;
+    if (async_guard_peek(&v, from, 8) != 8) *ok = 0;
+    return v;
+}
+static void async_guard_context(uint64_t site, const struct async_guard_regs *r, uint64_t rsp) {
+    static char text[3072];
+    static int busy;
+    if (__atomic_exchange_n(&busy, 1, __ATOMIC_ACQUIRE)) return;   /* rare; a second one at once is left out */
+    int ok = 1;
+    uint64_t table = 0, index = 0, list = 0, record = 0, size = 0, field = 0;
+    switch (site) {
+    case 0: table = r->rcx; index = r->rax; list = async_guard_u64(r->rbp - 0x520, &ok);
+            record = r->r12 + r->r14; size = 0x90; field = 0x80; break;
+    case 1: {
+            table = r->rax; index = r->rcx; list = r->rdx;
+            uint32_t slot = 0;
+            const uint64_t order = async_guard_u64(r->rbp - 0x550, &ok);
+            if (ok && async_guard_peek(&slot, order + 4 * (uint64_t)(int64_t)(int32_t)r->r13, 4) == 4) {
+                record = r->rbx + 40 * (uint64_t)slot; size = 0x28; field = 0x24;
+            }
+            break;
+        }
+    case 2: table = r->rdx; index = r->rax; list = async_guard_u64(r->rbp - 0x4f8, &ok);
+            record = r->r12; size = 0x30; field = 0x28; break;
+    case 3: { uint32_t i = 0; table = r->rdx; ok = async_guard_peek(&i, rsp + 0xa0, 4) == 4; index = i;
+              list = async_guard_u64(rsp + 0xc0, &ok); break; }
+    default: table = r->rcx; index = r->rax; list = async_guard_u64(rsp + 0x98, &ok); break;
+    }
+    int n = snprintf(text, sizeof(text), "Async guard: skip detail: site %s, pool index %" PRIu64 ", table 0x%" PRIx64,
+                     async_guard_sites[site], index, table);
+    /* the pool list: its table must be the one the game indexed, else the count is not this table's */
+    uint32_t count = 0;
+    const int have_list = ok && list && async_guard_u64(list, &ok) == table && ok &&
+                          async_guard_peek(&count, list + 8, 4) == 4;
+    if (have_list) {
+        n += snprintf(text + n, sizeof(text) - n, ", %u pools in the list", count);
+        static uint64_t entries[512];   /* under busy; kept off the game thread's stack */
+        const uint32_t seen = count < 512 ? count : 512;
+        if (seen && async_guard_peek(entries, table, 8 * (size_t)seen) == 8 * (size_t)seen) {
+            unsigned empty = 0;
+            for (uint32_t i = 0; i < seen; ++i) empty += !entries[i];
+            n += snprintf(text + n, sizeof(text) - n, ", %u empty%s; neighbours", empty, seen < count ? " (first 512)" : "");
+            for (int64_t i = (int64_t)index - 3; i <= (int64_t)index + 3; ++i)
+                if (i >= 0 && i < (int64_t)seen && n > 0 && (size_t)n < sizeof(text))
+                    n += snprintf(text + n, sizeof(text) - n, " %" PRId64 ":%s", i, entries[i] ? "set" : "empty");
+        } else if (n > 0 && (size_t)n < sizeof(text)) {
+            n += snprintf(text + n, sizeof(text) - n, ", table unreadable");
+        }
+        if (index >= count && n > 0 && (size_t)n < sizeof(text))
+            n += snprintf(text + n, sizeof(text) - n, "; index past the end of the list");
+    } else if (n > 0 && (size_t)n < sizeof(text)) {
+        n += snprintf(text + n, sizeof(text) - n, ", pool list unreadable or not this table (0x%" PRIx64 ")", list);
+    }
+    if (n > 0 && (size_t)n < sizeof(text)) {
+        if (!size) {
+            n += snprintf(text + n, sizeof(text) - n, "; %s\n", site >= 3 ? "a walk over every pool, no record" : "record unreadable");
+        } else {
+            unsigned char bytes[0x90];
+            const size_t got = async_guard_peek(bytes, record, size);
+            uint32_t named = 0;
+            if (got >= field + 4) memcpy(&named, bytes + field, 4);
+            n += snprintf(text + n, sizeof(text) - n, "; record 0x%" PRIx64 " (%zu bytes, names pool %u slot %u):",
+                          record, (size_t)size, named >> 16, named & 0xffff);
+            for (size_t i = 0; i < got && n > 0 && (size_t)n + 4 < sizeof(text); ++i)
+                n += snprintf(text + n, sizeof(text) - n, "%s%02x", i % 4 ? "" : " ", bytes[i]);
+            if (got < size && n > 0 && (size_t)n < sizeof(text)) n += snprintf(text + n, sizeof(text) - n, " (unreadable after %zu)", got);
+            if (n > 0 && (size_t)n < sizeof(text)) n += snprintf(text + n, sizeof(text) - n, "\n");
+        }
+    }
+    fputs(text, stdout);
+    tlg_compute_state(text, sizeof(text));
+    printf("Async guard: compute at the skip: %s\n", text);
+    __atomic_store_n(&busy, 0, __ATOMIC_RELEASE);
+}
+static ABI void async_guard_note(uint64_t site, const struct async_guard_regs *regs, uint64_t rsp) {
     if (site >= 5) return;
     const int64_t n = __atomic_add_fetch(&async_guard_skips[site], 1, __ATOMIC_RELAXED);
     if (n <= 5 || !(n & (n - 1))) {
@@ -997,6 +1106,7 @@ static ABI void async_guard_note(uint64_t site) {
         printf("Async guard: skipped a result for a missing pool (site %s, %" PRId64
                " so far, t=%.3f s)\n",
                async_guard_sites[site], n, ts.tv_sec + ts.tv_nsec / 1e9);
+        if (async_guard_detail) async_guard_context(site, regs, rsp);
     }
 }
 static unsigned char *async_guard_abs(unsigned char *p, unsigned char reg_op, uint64_t value, unsigned char modrm) {
@@ -1008,6 +1118,8 @@ static void install_async_guard(Segment *segments, uint64_t count) {
     const char *mode = getenv("TLG_ASYNC_GUARD");
     const unsigned long guard_mode = mode ? strtoul(mode, NULL, 0) : 1;
     if (!guard_mode) return;
+    const char *detail = getenv("TLG_ASYNC_GUARD_DETAIL");
+    async_guard_detail = !detail || strtoul(detail, NULL, 0) != 0;
     /* site 0: mov r13,[rcx+8*rax]; lea rdi,[r13+0x10]; call 0x271980 -> back at 0xc4cdd1, skip to 0xc4d30a
      * site 1: mov r12,[rax+8*rcx]; lea r14,[r12+0x30]; mov rdi,r14; call 0x2819c0 -> back at 0xc4d640,
      *         skip: xor ecx,ecx; inc r13d; to 0xc4d6ff */
@@ -1016,6 +1128,11 @@ static void install_async_guard(Segment *segments, uint64_t count) {
     static const unsigned char head0[] = {0x4c,0x8b,0x2c,0xc1, 0x4d,0x85,0xed, 0x74,0x1c, 0x49,0x8d,0x7d,0x10};
     static const unsigned char head1[] = {0x4c,0x8b,0x24,0xc8, 0x4d,0x85,0xe4, 0x74,0x20, 0x4d,0x8d,0x74,0x24,0x30, 0x4c,0x89,0xf7};
     static const unsigned char skip1[] = {0x31,0xc9, 0x41,0xff,0xc5};
+    /* async guard detail: push r14,r13,r12,rbp,rbx,rdx,rcx,rax (struct async_guard_regs, 64 bytes: rsp stays 16-aligned
+     * as at the game's own call there); mov rsi,rsp; lea rdx,[rsp+0x40] (the game's rsp). After: add rsp,0x40 */
+    static const unsigned char regs01[] = {0x41,0x56, 0x41,0x55, 0x41,0x54, 0x55, 0x53, 0x52, 0x51, 0x50,
+                                           0x48,0x89,0xe6, 0x48,0x8d,0x54,0x24,0x40};
+    static const unsigned char regs_drop[] = {0x48,0x83,0xc4,0x40};
     const uint64_t at[2] = {0xc4cdc4, 0xc4d62f}, back[2] = {0xc4cdd1, 0xc4d640}, skip[2] = {0xc4d30a, 0xc4d6ff};
     const uint64_t lock[2] = {0x271980, 0x2819c0};
     if (!mapped(segments, count, at[0], sizeof(expect0)) || memcmp(image + at[0], expect0, sizeof(expect0)) ||
@@ -1033,8 +1150,10 @@ static void install_async_guard(Segment *segments, uint64_t count) {
         p = async_guard_abs(p, 0xb8, (uintptr_t)image + lock[i], 0xd0);
         p = async_guard_abs(p, 0xb8, (uintptr_t)image + back[i], 0xe0);
         if ((size_t)(p - taken) != (i == 0 ? 0x1c - 4u : 0x20 - 8u)) fail("async guard: stub layout");
+        memcpy(p, regs01, sizeof(regs01)); p += sizeof(regs01);          /* async guard detail: registers, rsi, rdx */
         p = async_guard_abs(p, 0xbf, i, 0);                                /* rdi = site */
         p = async_guard_abs(p, 0xb8, (uintptr_t)async_guard_note, 0xd0);
+        memcpy(p, regs_drop, sizeof(regs_drop)); p += sizeof(regs_drop);
         if (i == 1) { memcpy(p, skip1, sizeof(skip1)); p += sizeof(skip1); }
         p = async_guard_abs(p, 0xb8, (uintptr_t)image + skip[i], 0xe0);
     }
@@ -1122,6 +1241,14 @@ static void install_async_guard_more(Segment *segments, uint64_t count) {
     static const unsigned char restore[] = {
         0xb8,0xff,0xff,0xff,0xff, 0xba,0xff,0xff,0xff,0xff, 0x48,0x0f,0xae,0x2c,0x24,
         0x48,0x8d,0x65,0xb8, 0x41,0x5b, 0x41,0x5a, 0x41,0x59, 0x41,0x58, 0x5f, 0x5e, 0x5a, 0x59, 0x58, 0x5d};
+    /* async guard detail: the same register block as at the first two sites, from the saved copies where the save
+     * path changed them: push r14,r13,r12, [rbp] (the game's rbp), rbx, [rbp-24] (rdx), [rbp-16] (rcx),
+     * [rbp-8] (rax); mov rsi,rsp; lea rdx,[rbp+8] (the game's rsp). 64 bytes below the 64-aligned xsave
+     * area, so the call is 16-aligned; add rsp,0x40 after it, before the xrstor reads [rsp]. */
+    static const unsigned char regs24[] = {0x41,0x56, 0x41,0x55, 0x41,0x54, 0xff,0x75,0x00, 0x53,
+                                           0xff,0x75,0xe8, 0xff,0x75,0xf0, 0xff,0x75,0xf8,
+                                           0x48,0x89,0xe6, 0x48,0x8d,0x55,0x08};
+    static const unsigned char regs_drop[] = {0x48,0x83,0xc4,0x40};
     unsigned char *stub = allocate(page_size), *p = stub, *entry[3];
     for (unsigned i = 0; i < 3; ++i) {
         entry[i] = p;
@@ -1133,8 +1260,10 @@ static void install_async_guard_more(Segment *segments, uint64_t count) {
         p = async_guard_jmp_abs(p, (uintptr_t)image + site[i].back);
         *jz = (unsigned char)(p - (jz + 1));
         p = async_guard_emit(p, save, sizeof(save));
+        p = async_guard_emit(p, regs24, sizeof(regs24));                 /* async guard detail: registers, rsi, rdx */
         p = async_guard_abs(p, 0xbf, 2 + i, 0);                          /* rdi = site */
         p = async_guard_abs(p, 0xb8, (uintptr_t)async_guard_note, 0xd0);
+        p = async_guard_emit(p, regs_drop, sizeof(regs_drop));
         p = async_guard_emit(p, restore, sizeof(restore));
         p = async_guard_jmp_abs(p, (uintptr_t)image + site[i].skip);
     }
@@ -1494,7 +1623,19 @@ int main(int argc, char **argv) {
     if (argc == 5 && !strcmp(argv[1], "--zar-extract")) return zar_extract(argv[2], argv[3], argv[4]);
     if (argc == 4 && !strcmp(argv[1], "--zar-pack")) return zarchive_pack(argv[2], argv[3]);
     if (argc == 4 && !strcmp(argv[1], "--import-shaders")) return tlg_import_shaders(argv[2], argv[3]);
+    if (argc == 6 && !strcmp(argv[1], "--import-shaders")) return tlg_import_shaders_list(argv[2], argv[3], argv[4], argv[5], 0, 1);
+    if (argc == 8 && !strcmp(argv[1], "--import-shaders"))
+        return tlg_import_shaders_list(argv[2], argv[3], argv[4], argv[5], (unsigned)strtoul(argv[6], NULL, 10), (unsigned)strtoul(argv[7], NULL, 10));
+    if (argc == 4 && !strcmp(argv[1], "--vkb-build-store")) return tlg_vkb_build_store(argv[2], argv[3]);
+    if (argc == 6 && !strcmp(argv[1], "--vkb-build-store") && !strcmp(argv[3], "--list")) return tlg_vkb_build_list(argv[2], argv[4], argv[5], 0, 1);
+    if (argc == 8 && !strcmp(argv[1], "--vkb-build-store") && !strcmp(argv[3], "--list"))
+        return tlg_vkb_build_list(argv[2], argv[4], argv[5], (unsigned)strtoul(argv[6], NULL, 10), (unsigned)strtoul(argv[7], NULL, 10));
+    if (argc == 4 && !strcmp(argv[1], "--vkb-compare-stores")) return tlg_vkb_compare_stores(argv[2], argv[3]);
     if (argc == 4 && !strcmp(argv[1], "--compare-meta")) return tlg_compare_meta(argv[2], argv[3]);
+    if (argc == 4 && !strcmp(argv[1], "--same-permutation")) return tlg_same_permutation(argv[2], argv[3]);
+    if (argc == 4 && !strcmp(argv[1], "--portable-recipes")) return tlg_portable_recipes(argv[2], argv[3]);
+    if (argc == 3 && !strcmp(argv[1], "--keys-from-portable")) return tlg_keys_from_portable(argv[2]);
+    if (argc == 7 && !strcmp(argv[1], "--prebuild")) return tlg_prebuild(argv[2], argv[3], argv[4], argv[5], (unsigned)strtoul(argv[6], NULL, 10));
     char missing[128];
     if (argc == 2 && !strcmp(argv[1], "--cpu-features")) {
         if (!cpu_supported(missing, sizeof missing)) return 20;

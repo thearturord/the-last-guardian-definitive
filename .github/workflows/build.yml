@@ -130,7 +130,7 @@ jobs:
           msystem: CLANG64
           update: true
           install: >-
-            git patch
+            git patch unzip
             mingw-w64-clang-x86_64-toolchain mingw-w64-clang-x86_64-cmake mingw-w64-clang-x86_64-ninja
             mingw-w64-clang-x86_64-pkgconf mingw-w64-clang-x86_64-python
             mingw-w64-clang-x86_64-vulkan-headers mingw-w64-clang-x86_64-vulkan-loader

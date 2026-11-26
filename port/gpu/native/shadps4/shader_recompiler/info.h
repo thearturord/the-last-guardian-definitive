@@ -25,6 +25,15 @@ struct Archive;
 
 namespace VkbShader {
 
+/// tlg: shader recipes of the new engine (native_vkb_shader_recipe.h, TLG_VKB_SHADER_RECIPES). While guest_read_hook is set, every
+/// guest memory read of the translator on this thread is reported with the bytes it read (the descriptor tables through ReadUdReg, the
+/// fetch shader, the tessellation constants). In the build process (tlg-probe --vkb-build-store), replay_flat replaces the walk of the resource tables
+/// (the flattened user data as the game's translation made them) and guest_valid_hook answers whether recorded guest memory holds an
+/// address (the process has none of the game's own). All three are null in the game outside a recording: nothing changes.
+inline thread_local void (*guest_read_hook)(const void* address, const void* bytes, size_t size) = nullptr;
+inline thread_local const std::vector<u32>* replay_flat = nullptr;
+inline thread_local bool (*guest_valid_hook)(const void* address, size_t size) = nullptr;
+
 enum class Qualifier : u8 {
     None,
     Smooth,
@@ -202,6 +211,11 @@ struct Info : InfoPersistent {
         if (ptr_index != IR::NumScalarRegs) {
             std::memcpy(&base, &ud[ptr_index], sizeof(base));
             base = reinterpret_cast<const u32*>(VAddr(base) & 0xFFFFFFFFFFFFULL);
+            std::memcpy(&data, base + dword_offset, sizeof(T));
+            if (guest_read_hook) [[unlikely]] {
+                guest_read_hook(base + dword_offset, &data, sizeof(T));
+            }
+            return data;
         }
         std::memcpy(&data, base + dword_offset, sizeof(T));
         return data;
@@ -235,6 +249,11 @@ struct Info : InfoPersistent {
     }
 
     void RefreshFlatBuf() {
+        if (replay_flat) [[unlikely]] {
+            flattened_ud_buf = *replay_flat;
+            flattened_ud_buf.resize(srt_info.flattened_bufsize_dw);
+            return;
+        }
         flattened_ud_buf.resize(srt_info.flattened_bufsize_dw);
         ASSERT(user_data.size() <= NUM_USER_DATA_REGS);
         std::memcpy(flattened_ud_buf.data(), user_data.data(), user_data.size_bytes());
@@ -251,6 +270,9 @@ struct Info : InfoPersistent {
         memcpy(&tess_constants,
                reinterpret_cast<TessellationDataConstantBuffer*>(tess_constants_addr),
                sizeof(tess_constants));
+        if (guest_read_hook) [[unlikely]] {
+            guest_read_hook(reinterpret_cast<const void*>(tess_constants_addr), &tess_constants, sizeof(tess_constants));
+        }
     }
 
     void Serialize(Serialization::Archive& ar) const;

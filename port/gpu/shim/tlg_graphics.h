@@ -60,9 +60,11 @@ inline int ParseEngineFps(int value) {
     return IndexOf(EngineFps, value, -1) >= 0 ? value : 120;
 }
 /// tlg: the launch's TLG_ENGINE_FPS (launcher/tlg_run.py, TLG_FPS): 30 unpatched, 60 with the
-/// 60 FPS patches, 240 unlocked; another value is taken as a 60/120/240 ceiling.
+/// 60 FPS patches, 120 the fixed 120 mode, 1000 unlocked (experimental: no ceiling); another
+/// value is taken as a 60/120/240 ceiling.
+inline constexpr int UncappedEngineFps = 1000;
 inline int ParseAppliedEngineFps(int value) {
-    return value == 30 ? 30 : ParseEngineFps(value);
+    return value == 30 || value == UncappedEngineFps ? value : ParseEngineFps(value);
 }
 
 /// Frames the GPU command thread may queue ahead of the GPU; 0 = unbounded.

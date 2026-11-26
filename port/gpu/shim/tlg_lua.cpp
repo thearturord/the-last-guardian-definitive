@@ -9,7 +9,7 @@
 // install_lua_hook). utils.lua gets a tick that loads "--TLGSET" every 15 frames; that chunk
 // is replaced by code applying the Effects settings to the game's post-process objects, so
 // menu changes apply live, plus the Lab rows (tlg_lab.h). "--TLGLOG <text>" chunks print <text>
-// (data out of Lua; "fun tricos <n>" reports the Fun tab's Trico count); "--TLGVAL <row> <value>" chunks report a Lab row's game value;
+// (data out of Lua; "fun tricos <n>" reports the Extras tab's Trico count); "--TLGVAL <row> <value>" chunks report a Lab row's game value;
 // "--TLGLOADED" marks the end of a stage load.
 // The settings code compiles into a function the tick keeps and runs every time; it is sent
 // again only when its text changes, so a tick compiles nothing and creates few strings.
@@ -19,6 +19,9 @@
 #include "tlg_overlay.h"
 #include "tlg_settings.h"
 #include "tlg_toggles.h"
+#include "video_core/renderer_vulkan/shader_list.h"
+#include "video_core/renderer_vulkan/shader_recipe.h"
+#include "native/native_vkb_shader_prebuild.h"
 #include "../tlggpu.h"
 #include <algorithm>
 #include <atomic>
@@ -330,6 +333,86 @@ local function Horns(on)
   end
   _TLGHORN=H
 end
+-- Mods > Foxtail toy (tlg.ini mod_foxtail 1): the boy holds the cut foxtail toy in his right hand
+-- (own model, from the same archive as the horns). _TLGFOXWANT says who wants it: 'keep' (the
+-- Foxtail button) or 'play' (Play like a cat, for the move only). The game's Hide flag does not hide
+-- it once it hangs on the hand bone, so it is hidden by scale 0 (live 2026-11-23). Shown at 1.5x
+-- (the size picked live). A stage load removes it; the next run puts it back while it is wanted.
+local FOXTAIL='game/assets/props/level/foxtail_toy/foxtail_toy'
+function _TLGFox(show)
+  local n=_TLGFOXO
+  if n and not Has(n) then n=nil _TLGFOXO=nil _TLGFOXSHOWN=nil end
+  if not show then
+    if n and _TLGFOXSHOWN then pcall(function() FindObject(n).scale='0 0 0 1' end) end
+    _TLGFOXSHOWN=nil return true
+  end
+  if not n then
+    if _TLGFOXX or not Has('Player') then return false end
+    local ok,hand=pcall(GameCharacter.FindBone,'Player','jt_Item_inHand_Rt')
+    if not ok or not hand then return false end
+    local got,o=pcall(Load,FOXTAIL)
+    local c=got and o and (FindObject(o) or o)
+    if not c then _TLGFOXX=true L('fun foxtail: model missing (build it in the launcher)') return false end
+    Connect(hand,c) c.position='0 0 0 1' c.rotation='0 0 0'
+    n=c:GetName() _TLGFOXO=n
+  end
+  if not _TLGFOXSHOWN then
+    local ok=pcall(function() local c=FindObject(n) c.entityFlags='~Hide' c.scale='1.5 1.5 1.5 1' end)
+    _TLGFOXSHOWN=ok or nil
+  end
+  return true
+end
+local function Foxtail(on)
+  if not on then _TLGFOXWANT=nil end
+  if not Has('Player') then _TLGFOXX=nil end
+  _TLGFOXON=on
+  _TLGFox(on and _TLGFOXWANT~=nil)
+end
+-- Trico's helmet (tlg.ini trico_helmet): 0 = the story's own, 1 armour helmet, 2 broken helmet,
+-- 3 the other Trico's mask, 4 none. The game sets Trico's look ~30 times along the story
+-- (CharacterMngr.SetupTricoParts -> CondorCharacter.SetParts); our wrapper swaps the helmet part
+-- for our Trico only (other Tricos keep theirs) and remembers the story's choice for mode 0.
+-- Applied once on a change or a new Trico; a stage load that brings the game's SetParts back is
+-- wrapped again on the next run.
+local HELMETS={'TricoHelmet','TricoHelmetBroken','AricoHelmet','DisableHelmet'}
+local function Helmet(m)
+  local C,P=CondorCharacter,GCharacterParam
+  if not C or type(C.SetParts)~='function' or not P or not CharacterMngr then return end
+  local H=_TLGHELM or {} _TLGHELM=H
+  if m==0 and not H.f then return end
+  H.want=HELMETS[m] and P[HELMETS[m]] or nil
+  if C.SetParts~=H.f then
+    H.orig=C.SetParts
+    H.f=function(self,data)
+      local W=_TLGHELM
+      if type(data)=='table' then
+        local ok,t=pcall(CharacterMngr.GetTrico,CharacterMngr)
+        if ok and self==t then
+          if data.helmet then W.story=data.helmet end
+          if W.want then
+            local c={} for k,v in pairs(data) do c[k]=v end c.helmet=W.want data=c
+          end
+        end
+      end
+      return W.orig(self,data)
+    end
+    C.SetParts=H.f
+  end
+  local ok,t=pcall(CharacterMngr.GetTrico,CharacterMngr)
+  if not ok or not t then H.t=nil return end
+  if H.t==t and H.m==m then return end
+  -- SetPartsFunc.helmet hides the helmet named in PartsSettings.Current, so Current must follow
+  -- each swap (a copy with the new helmet), or the next swap leaves the old model on (11-23).
+  -- Not SetParts with only the helmet: that makes Current helmet-only and breaks later tail swaps.
+  local set=C.SetPartsFunc and C.SetPartsFunc.helmet
+  local ps=t.PartsSettings
+  if type(set)~='function' or type(ps)~='table' or type(ps.Current)~='table' then return end
+  local part=H.want or H.story or P.DisableHelmet
+  if part and pcall(set,t,part) then
+    local n={} for k,v in pairs(ps.Current) do n[k]=v end n.helmet=part ps.Current=n
+    H.t=t H.m=m
+  end
+end
 -- Field of view: every camera mode has its own GameCameraParam (Base_FovDeg 70 as shipped).
 local function Fov(deg)
   if deg==70 and not B.fovd then return end
@@ -373,6 +456,21 @@ local function TreeWind(pct)
   end
   B.twd=pct~=100
 end
+-- Brain room dome (s17_SentinelTower ST_010_BrainRoom, issue #100): BrainControlExt heals the dome
+-- by darkDomeHealFastSpeed/SlowSpeed per frame, tuned for the PS4's 30 FPS, so at 120 FPS it grew
+-- back 4x as fast. Scaled by the frame time to the 30 FPS pace (tested live 11-22: a quarter at
+-- 120 FPS plays right); never above the game's own value, so 30 FPS and below stay as shipped.
+local DOME='F:game/stages/s17_SentinelTower/props/darkDome | EXT:BrainControlExt'
+local function Dome()
+  local okd,dt=pcall(MSC_GetGameDelta)
+  if not okd or type(dt)~='number' or dt<=0 then return end
+  B.domedt=(B.domedt or dt)*0.8+dt*0.2
+  local oko,o=pcall(MS.SearchObject,DOME)
+  if not oko or not o then return end
+  local pct=math.min(100,B.domedt*3000)
+  Scale(o,'domef','darkDomeHealFastSpeed',pct)
+  Scale(o,'domes','darkDomeHealSlowSpeed',pct)
+end
 )";
 
 // The start of the function the tick runs: objects are looked up again every run.
@@ -410,7 +508,7 @@ std::string DevChunk() {
            text.str() + "\nend\n";
 }
 
-// Fun tab commands (tlg_fun.h): queued by the menu, run once by the next tick, at the top of the
+// Extras tab commands (tlg_fun.h): queued by the menu, run once by the next tick, at the top of the
 // settings chunk like DevChunk (the chunk differs, so it is sent and run; the next one is plain).
 std::mutex fun_mutex;
 std::string fun_queue;
@@ -428,7 +526,7 @@ std::atomic<uint32_t> photo_sticks{0x80808080u}; // the last raw sticks lx|ly<<8
 std::atomic<TlgFun::PhotoFreeze> photo_freeze{TlgFun::PhotoFreeze::Pause};
 std::atomic<bool> pilot{false}; // Tricopilot (TlgFun::Tricopilot)
 // Which camera watches him (TlgFun::PilotCam). Middle is what autoTrico() picks itself, so that
-// stays our default; the launcher and the Fun tab can pick another one, also while he drives.
+// stays our default; the launcher and the Extras tab can pick another one, also while he drives.
 std::atomic<TlgFun::PilotCam> pilot_cam{[] {
     const char* env = std::getenv("TLG_TRICOPILOT_CAM");
     if (env && *env) {
@@ -748,13 +846,15 @@ std::string SetChunk() {
                   std::clamp(s.trico_fur.load(), 0, 500), s.fov.load(),
                   s.grass_smooth.load() ? "true" : "false", s.boy_wind.load(), s.tree_wind.load());
     code += line;
-    code += "Drool(" + std::to_string(std::clamp(s.trico_drool.load(), 0, 2)) + ")\n";
+    code += "Drool(" + std::to_string(std::clamp(s.trico_drool.load(), 0, 2)) + ") Helmet(" +
+            std::to_string(std::clamp(s.trico_helmet.load(), 0, 4)) + ") Dome()\n";
     code += std::string("Plays(") + (s.mod_plays.load() ? "true" : "false") + ") ThrowUp(" +
             std::to_string(s.mod_throw_up.load() ? 1 : 0) + ") _TLGHINTS=" +
             (s.mod_hints.load() ? "true" : "false") + " _TLGHIDEHINTS=" +
             (s.hide_hints.load() ? "true" : "false") + "\n";
     code += std::string("Treasures(") + (s.mod_treasures.load() ? "true" : "false") + ") Horns(" +
-            (s.mod_horns.load() ? "true" : "false") + ") ButtonIcons(" +
+            (s.mod_horns.load() ? "true" : "false") + ") Foxtail(" +
+            (s.mod_foxtail.load() ? "true" : "false") + ") ButtonIcons(" +
             (s.XboxIcons() ? "true" : "false") + "," + std::to_string(WideFactor()) + ")\n";
     if (subtitle_shift) {
         // Re-applied every tick: SubtitleSystem:Initialize resets it to (0, -OFFSET_Y).
@@ -921,11 +1021,33 @@ bool GameEdits(std::string& patched, std::string_view name) {
             patched.insert(at + LoadEnd.size(), Loaded);
             changed = true;
         }
-        // A stage started from the QA menu or the Fun tab is loaded on top of the current one (StartStage
+        // A stage started from the QA menu or the Extras tab is loaded on top of the current one (StartStage
         // unloads nothing), so each switch held two stages and ran the GPU heap out of memory.
         // Do what the game's own restart does: disconnect the stage's regions, preload the new
         // ones, then unload what is still disconnected. The common regions stay.
         static constexpr std::string_view Blocker = "self.timeBlocker = CreateTimeBlocker()";
+        // shader_prebuild on: a stage load (a stage start, or a restart: continue, checkpoint)
+        // begins with the time blocker; "--TLGLOADING" there waits for the background shader
+        // build, except the session's first load (the title stage), so the title screen never
+        // waits and the first stage played starts with its shaders built. The new engine's
+        // pre-build (TLG_VKB=1 with TLG_VKB_SHADER_PREBUILD on: native_vkb_shader_prebuild.h)
+        // waits at the same place.
+        if (Vulkan::ShaderList::Enabled() || Core::Vkb::Prebuild::HookWanted()) {
+            static constexpr std::pair<std::string_view, std::string_view> Loads[] = {
+                {"self.timeBlocker = CreateTimeBlocker()",
+                 " do local f=(loadstring or load)('--TLGLOADING start '..tostring(name))"
+                 " if f then f() end end"},
+                {"GameSetupTbl.timeBlocker = CreateTimeBlocker()",
+                 " do local f=(loadstring or load)('--TLGLOADING restart') if f then f() end end"},
+            };
+            for (const auto& [anchor, marker] : Loads) {
+                for (size_t at = patched.find(anchor); at != std::string::npos;
+                     at = patched.find(anchor, at + anchor.size() + marker.size())) {
+                    patched.insert(at + anchor.size(), marker);
+                    changed = true;
+                }
+            }
+        }
         static constexpr std::string_view Preloaded =
             "DelayExec( function() self:Start_Stage_2nd_PreloadWait(area) end )";
         const size_t blocker = patched.find(Blocker);
@@ -1252,6 +1374,17 @@ extern "C" __attribute__((sysv_abi)) int tlg_lua_load(void* L, void* options, co
         TlgOverlay::SetPauseMenu(size > 10 && buffer[10] == '1');
         return original(L, options, Empty.data(), Empty.size(), name);
     }
+    if (StartsWith(buffer, size, "--TLGLOADING")) {
+        static int loads = 0; // game thread only
+        const std::string what{buffer + 12, size > 12 ? size - 12 : 0};
+        std::printf("Shader prebuild: stage load%s%s\n", what.c_str(),
+                    loads == 0 ? " (first of the session: no wait)" : "");
+        Core::Vkb::Prebuild::StageLoad(what.c_str(), loads == 0); // no-op unless the new engine's pre-build is on
+        if (loads++ != 0) {
+            Vulkan::ShaderRecipe::WaitImport("stage load");
+        }
+        return original(L, options, Empty.data(), Empty.size(), name);
+    }
     if (StartsWith(buffer, size, "--TLGLOADED")) {
         TlgSettings::Get().stage_loaded = true;
         return original(L, options, Empty.data(), Empty.size(), name);
@@ -1372,8 +1505,11 @@ void RemoveTricos() {
 //  - Not started within 2.5 s: reset him and try once more (11 of the 60 needed that), never in a
 //    story event, a jump or a climb (control mode EVENT, JUMP, COLUMN).
 // Waits are in game seconds (currentInfo.dt; os.time does not move inside a tick).
-constexpr std::string_view ActLua =
+// ActHead: the helpers; then ActLua (every move) or CatLua (Foxtail play). A new pick also takes
+// away a foxtail toy that only came for Play like a cat.
+constexpr std::string_view ActHead =
     "if _TLG_ACT then pcall(UnRegisterTick,_TLG_ACT) _TLG_ACT=nil end\n"
+    "if _TLGFOXWANT=='play' then _TLGFOXWANT=nil pcall(_TLGFox,false) end\n"
     "local function ci() return Ai2.Utils.GetAIProps('Condor').currentInfo end\n"
     "local function dt() local ok,d=pcall(function() return ci().dt end) return (ok and type(d)=='number' and d>0 and d<1) and d or 1/60 end\n"
     "local function anim() local ok,a=pcall(function() return tostring(ci().mainPlayingAnim) end) return ok and a:lower() or '?' end\n"
@@ -1399,7 +1535,8 @@ constexpr std::string_view ActLua =
     "  if not getpose('stand') then return false end cmd('EX_photo') return upto(8,has('photo_loop'))\n"
     " elseif p=='sitplay' then if a=='ext_c_sit_plays_loop' then return true end\n"
     "  if not getpose('sit') then return false end cmd('sit_plays') return upto(6,is('ext_c_sit_plays_loop')) end\n"
-    " return true end\n"
+    " return true end\n";
+constexpr std::string_view ActLua =
     "local function try(wait) if pose~='' and not getpose(pose) then return false end\n"
     " cmd(act) local t,hit=0,false\n"
     " if hold>0 then while t<hold do if seen() then hit=true end cmd(act) t=t+dt() coroutine.yield() end return hit end\n"
@@ -1414,6 +1551,50 @@ constexpr std::string_view ActLua =
     "_TLG_ACT=function() local ok,e=coroutine.resume(co) if not ok then L('fun act error: '..tostring(e)) end\n"
     " if coroutine.status(co)=='dead' then UnRegisterTick(_TLG_ACT) _TLG_ACT=nil end end\n"
     "RegisterTick(_TLG_ACT)\n";
+
+// Foxtail play (tlg_foxtail_play): the developers' cut PlayToy act (intactcondor.lua PJT_CatToy), restored;
+// worked out live 2026-11-23 on the terrace (s04 _090_GardenTerrace_001, user: "super"). Trico's own move
+// is cat_toy (the plain Play like a cat button). With Mods > Foxtail toy on, the boy holds the
+// toy 1 s before the move (unless the Foxtail button already gave it to him) and it goes 3 s after.
+// Trico gets the command every frame until his cat_toy animation shows (1.5 s; else the reset and 3 s
+// more, never in a story event, a jump or a climb), then 3 s more: sent for less he cancels halfway
+// (cat_toy_cancel). 1 s into the move the boy claps his hands (his own B_gesture_instruct; set from
+// Lua, because in photo mode the pad does not reach him), only when he stands free (not on Trico,
+// not climbing, not in the air or in water).
+constexpr std::string_view CatLua =
+    "local boy\n"
+    "local function boyfree() local ok,v=pcall(function() local P=Ai2.PlayerUtils return not P.IsParentCondor()\n"
+    "  and not P.IsClimbObject() and not P.IsInTheAir() and not P.IsInWater() end) return ok and v end\n"
+    "local function wait(s) local t=0 while t<s do t=t+dt() coroutine.yield() end end\n"
+    "local function play(wait)\n"
+    " local t=0 while t<wait do cmd(act) if seen() then break end t=t+dt() coroutine.yield() end\n"
+    " if not seen() then return false end\n"
+    " local h,clap=0,false\n"
+    " while h<hold do cmd(act) h=h+dt()\n"
+    "  if boy and not clap and h>=1 then clap=true pcall(MS.CondorCmnSetAnimationState,'Player','B_gesture_instruct') end\n"
+    "  coroutine.yield() end\n"
+    " return true end\n"
+    "local function foxoff() if _TLGFOXWANT=='play' then _TLGFOXWANT=nil pcall(_TLGFox,false) end end\n"
+    "local co=coroutine.create(function()\n"
+    " boy=boyfree()\n"
+    " if boy then pcall(MS.CondorCmnSetAnimationState,'Player','B_P_stand') end\n"
+    " if _TLGFOXON and _TLGFOXWANT~='keep' then _TLGFOXWANT='play'\n"
+    "  local ok,shown=pcall(_TLGFox,true) if ok and shown then wait(1) end end\n"
+    " local ok,how=play(1.5),''\n"
+    " if not ok and canreset() then cmd('Restart') upto(1,is('c_stand')) ok,how=play(3),' after reset' end\n"
+    " if ok then local t=0 while t<4 and seen() do t=t+dt() coroutine.yield() end\n"
+    "  if _TLGFOXWANT=='play' then wait(3) end L('fun act tlg_foxtail_play ok'..how)\n"
+    " else L('fun act tlg_foxtail_play did not play (now '..anim()..', mode '..mode()..')') end\n"
+    " foxoff() end)\n"
+    "_TLG_ACT=function() local ok,e=coroutine.resume(co) if not ok then L('fun act error: '..tostring(e)) foxoff() end\n"
+    " if coroutine.status(co)=='dead' then UnRegisterTick(_TLG_ACT) _TLG_ACT=nil end end\n"
+    "RegisterTick(_TLG_ACT)\n";
+
+// The Foxtail button: the boy holds the foxtail toy until it is pressed again (tlg_lua.cpp _TLGFox).
+constexpr std::string_view FoxtailLua =
+    "if not _TLGFOXON then L('fun act tlg_foxtail: Mods > Foxtail toy is off') return end\n"
+    "if _TLGFOXWANT=='keep' then _TLGFOXWANT=nil _TLGFox(false) L('fun act tlg_foxtail off')\n"
+    "else _TLGFOXWANT='keep' L('fun act tlg_foxtail '..(_TLGFox(true) and 'on' or 'not shown')) end\n";
 
 // The tummy moves are no control commands: they run the game's own vomit code (ai2/condor/
 // condorcommonactioneatable.lua). Gag: AddVomitIntr, the retch Trico does after eating barrels; he
@@ -1445,13 +1626,17 @@ void Act(const char* command) {
     std::printf("Fun: Trico action %s\n", command);
     if (std::string_view(command) == "tlg_gag") return FunQueue(std::string(GagLua));
     if (std::string_view(command) == "tlg_throw_up") return FunQueue(std::string(ThrowUpLua));
+    if (std::string_view(command) == "tlg_foxtail") return FunQueue(std::string(FoxtailLua));
+    // Foxtail play sends Trico's own cat_toy move (CatLua); every other move sends its own command.
+    const bool foxtail_play = std::string_view(command) == "tlg_foxtail_play";
+    const std::string act = foxtail_play ? "cat_toy" : command;
     std::string key(action->key ? action->key : command);
     for (auto& c : key) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     char hold[32];
     std::snprintf(hold, sizeof(hold), "%.2f", action->hold);
-    FunQueue(std::string("local act,key,pose,hold='") + command + "','" + key + "'," +
+    FunQueue(std::string("local act,key,pose,hold='") + act + "','" + key + "'," +
              (action->pose ? std::string("'") + action->pose + "'" : std::string("nil")) + "," + hold + "\n" +
-             std::string(ActLua));
+             std::string(ActHead) + std::string(foxtail_play ? CatLua : ActLua));
 }
 
 void CountTricos() {

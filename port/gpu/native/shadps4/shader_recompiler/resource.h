@@ -116,6 +116,7 @@ constexpr u32 MaxSamplers = 1u << 12;
 } // namespace Indexed
 
 struct BufferResource {
+    bool operator==(const BufferResource&) const = default; ///< tlg: the shader store's check mode compares translations (TLG_VKB_SHADER_PREBUILD=check)
     SharpFetch<VkbAmdGpu::Buffer> sharp_fetch{};
     IR::Type used_types{};
     BufferType buffer_type{};
@@ -168,6 +169,7 @@ enum class MipStorageFallbackMode : u16 {
 };
 
 struct ImageResource {
+    bool operator==(const ImageResource&) const = default; ///< tlg: the shader store's check mode compares translations (TLG_VKB_SHADER_PREBUILD=check)
     SharpFetch<VkbAmdGpu::Image> sharp_fetch{};
     bool is_depth{};
     bool is_atomic{};
@@ -334,6 +336,7 @@ namespace Indexed {
 } // namespace Indexed
 
 struct SamplerResource {
+    bool operator==(const SamplerResource&) const = default; ///< tlg: the shader store's check mode compares translations (TLG_VKB_SHADER_PREBUILD=check)
     SharpFetch<VkbAmdGpu::Sampler> sharp_fetch{};
     SharpFetchPostOp post_op{};
     SharpLocation post_op_tsharp_dw3_off{};
@@ -379,6 +382,7 @@ struct SamplerResource {
 using SamplerResourceList = boost::container::static_vector<SamplerResource, NUM_SAMPLERS>;
 
 struct FMaskResource {
+    bool operator==(const FMaskResource&) const = default; ///< tlg: the shader store's check mode compares translations (TLG_VKB_SHADER_PREBUILD=check)
     SharpLocation sharp_idx;
 
     constexpr VkbAmdGpu::Image GetSharp(const auto& info) const noexcept {

@@ -11,6 +11,7 @@
 #include "tlg_toggles.h"
 #include "tlg_command_diag.h"
 #include <cstdio>
+#include <cstdlib>
 #include <boost/preprocessor/stringize.hpp>
 
 #include "common/assert.h"
@@ -1438,12 +1439,17 @@ static constexpr s64 ComputeLateUs = 1'000'000;
 // Once a minute: the slowest submit-to-fence time and the slowest memory wait, plus how many
 // went over 100 ms. Printed only when something went over 100 ms. "t" is the same clock as the
 // "Async guard" lines, so the two can be matched up.
+// tlg async guard detail: the worst times of the minute before, kept for tlg_compute_state (log only).
+static std::mutex compute_timing_mutex;
+static s64 compute_window_start = 0, compute_worst_fence = 0, compute_worst_wait = 0;
+static s64 compute_prev_fence = 0, compute_prev_wait = 0, compute_prev_window = 0;
 static void ComputeTimingSample(bool is_wait, s64 us) {
     static constexpr s64 SlowUs = 100'000, WindowUs = 60'000'000;
-    static std::mutex m;
-    static s64 window_start = 0, worst_fence = 0, worst_wait = 0, slow = 0, samples = 0;
+    static s64 slow = 0, samples = 0;
+    s64 &window_start = compute_window_start, &worst_fence = compute_worst_fence,
+        &worst_wait = compute_worst_wait;
     const s64 now = ComputeNowUs();
-    std::scoped_lock lk{m};
+    std::scoped_lock lk{compute_timing_mutex};
     if (window_start == 0) window_start = now;
     s64& worst = is_wait ? worst_wait : worst_fence;
     worst = std::max(worst, us);
@@ -1455,8 +1461,58 @@ static void ComputeTimingSample(bool is_wait, s64 us) {
                     "%lld of %lld over 0.1 s (last minute)\n",
                     now / 1e6, worst_fence / 1e6, worst_wait / 1e6,
                     static_cast<long long>(slow), static_cast<long long>(samples));
+    compute_prev_fence = worst_fence;
+    compute_prev_wait = worst_wait;
+    compute_prev_window = now - window_start;
     window_start = now;
     worst_fence = worst_wait = slow = samples = 0;
+}
+
+// tlg async guard detail: compute work still open right now, per queue: submitted and not finished, the
+// submit time of the one in progress (a queue runs its work in order, so it is the oldest), and
+// the start of a memory wait it sits in. Written by the GPU thread and SubmitAsc, read only by
+// tlg_compute_state when the async guard skips a result (log only, no behaviour change).
+// Switch: off with TLG_ASYNC_GUARD=0 (no guard, so no skip note) or TLG_ASYNC_GUARD_DETAIL=0; then
+// none of these counters is touched. Read once, before the first compute work.
+static const bool compute_open_on = [] {
+    const char* guard = std::getenv("TLG_ASYNC_GUARD");
+    const char* detail = std::getenv("TLG_ASYNC_GUARD_DETAIL");
+    return !(guard && std::strtoul(guard, nullptr, 0) == 0) && !(detail && std::strtoul(detail, nullptr, 0) == 0);
+}();
+static std::atomic<s64> compute_open[Liverpool::NumTotalQueues];
+static std::atomic<s64> compute_in_progress_us[Liverpool::NumTotalQueues];
+static std::atomic<s64> compute_wait_start_us[Liverpool::NumTotalQueues];
+
+// One line for the "Async guard" skip note: the slowest fence and memory wait of the last
+// minute (this window and the one before), and the compute work that is open right now.
+extern "C" void tlg_compute_state(char* out, size_t size) {
+    const s64 now = ComputeNowUs();
+    s64 fence, wait, window;
+    {
+        std::scoped_lock lk{compute_timing_mutex};
+        fence = std::max(compute_worst_fence, compute_prev_fence);
+        wait = std::max(compute_worst_wait, compute_prev_wait);
+        window = (compute_window_start ? now - compute_window_start : 0) + compute_prev_window;
+    }
+    int n = std::snprintf(out, size,
+                          "slowest fence %.3f s, slowest memory wait %.3f s (over the last %.0f s); "
+                          "compute work open:",
+                          fence / 1e6, wait / 1e6, window / 1e6);
+    bool any = false;
+    for (u32 q = 0; q < Liverpool::NumTotalQueues && n > 0 && size_t(n) < size; ++q) {
+        const s64 open = compute_open[q].load(std::memory_order_relaxed);
+        const s64 since = compute_in_progress_us[q].load(std::memory_order_relaxed);
+        const s64 waiting = compute_wait_start_us[q].load(std::memory_order_relaxed);
+        if (open <= 0 && !since && !waiting) continue;
+        any = true;
+        n += std::snprintf(out + n, size - n, " queue %u: %lld", q, static_cast<long long>(open));
+        if (since && size_t(n) < size)
+            n += std::snprintf(out + n, size - n, ", oldest submitted %.3f s ago", (now - since) / 1e6);
+        if (waiting && size_t(n) < size)
+            n += std::snprintf(out + n, size - n, ", in a memory wait for %.3f s", (now - waiting) / 1e6);
+        if (size_t(n) < size) n += std::snprintf(out + n, size - n, ";");
+    }
+    if (!any && n > 0 && size_t(n) < size) std::snprintf(out + n, size - n, " none");
 }
 
 template <bool is_indirect>
@@ -1464,6 +1520,9 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid, s6
     FIBER_ENTER(acb_task_name[vqid]);
     if (submit_us < 0) {
         submit_us = ComputeNowUs();
+    }
+    if (!is_indirect && compute_open_on) {
+        compute_in_progress_us[vqid].store(submit_us, std::memory_order_relaxed); // tlg async guard detail, log only
     }
     auto& queue = asc_queues[{vqid}];
 
@@ -1709,9 +1768,11 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid, s6
             ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
             if (!wait_reg_mem->Test(regs.reg_array)) {
                 const s64 wait_start = ComputeNowUs();
+                if (compute_open_on) compute_wait_start_us[vqid].store(wait_start, std::memory_order_relaxed);
                 while (!wait_reg_mem->Test(regs.reg_array)) {
                     YIELD_ASC(vqid);
                 }
+                if (compute_open_on) compute_wait_start_us[vqid].store(0, std::memory_order_relaxed);
                 const s64 waited = ComputeNowUs() - wait_start;
                 ComputeTimingSample(true, waited);
                 if (waited > ComputeLateUs) {
@@ -1764,6 +1825,10 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid, s6
         }
     }
 
+    if (!is_indirect && compute_open_on) {
+        compute_in_progress_us[vqid].store(0, std::memory_order_relaxed); // tlg async guard detail, log only
+        compute_open[vqid].fetch_sub(1, std::memory_order_relaxed);
+    }
     FIBER_EXIT;
 }
 
@@ -1835,6 +1900,7 @@ void Liverpool::SubmitAsc(u32 gnm_vqid, std::span<const u32> acb) {
     auto& queue = mapped_queues[gnm_vqid];
 
     const auto vqid = gnm_vqid - 1;
+    if (compute_open_on) compute_open[vqid].fetch_add(1, std::memory_order_relaxed); // tlg async guard detail, log only
     // Taken here, not in the task: the task body first runs when the GPU thread picks it up.
     const auto& task = ProcessCompute(acb, vqid, ComputeNowUs());
     {

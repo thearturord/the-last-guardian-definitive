@@ -218,6 +218,10 @@ struct PushData {
     static constexpr u32 BufOffsetIndex = UdRegsIndex + NUM_USER_DATA_REGS / 4;
     static constexpr u32 MotionParamIndex = BufOffsetIndex + NUM_BUFFERS / 16 + 1;
     static constexpr u32 SceneSizeIndex = MotionParamIndex + 1;
+    // tlg: compute shaders do not use the viewport words; the leaf shading pass reads its live
+    // strength and radius there (leaf_ambient_occlusion_pass.cpp, set per dispatch).
+    static constexpr u32 LeafAoStrengthIndex = XOffsetIndex;
+    static constexpr u32 LeafAoRadiusIndex = YOffsetIndex;
 
     float xoffset;
     float yoffset;

@@ -54,10 +54,10 @@ MENU = [
     _menu('Image', 'smaa', 'bool', '0', 'SMAA 1x anti-aliasing',
           'Smooths jagged edges on the final image (a little GPU time).'),
     _menu('Image', 'upscaler', 'choice', 'dlss', 'Upscaler',
-          ('Draws the image at the chosen quality: DLSS (NVIDIA RTX), FSR 4 (any recent card), FSR 3.1 (any card), TAA (any card, lighter, native size only) '
-           "or the game's own pass (Built-in). At Native AA quality it is the anti-aliasing."),
+          ('Draws the image at the chosen quality: DLSS (NVIDIA RTX), FSR 4 (any recent card), FSR 3.1 (any card), TAA (any card, lighter, native size only), '
+           "XeSS (any recent card, Windows only) or the game's own pass (Built-in). At Native AA quality it is the anti-aliasing."),
           choices=(('off', 'Built-in (game)'), ('dlss', 'DLSS'),
-                   ('fsr3', 'FSR 3.1'), ('fsr4', 'FSR 4'), ('taa', 'TAA'))),
+                   ('fsr3', 'FSR 3.1'), ('fsr4', 'FSR 4'), ('taa', 'TAA'), ('xess', 'XeSS'))),
     _menu('Image', 'preset', 'choice', '0', 'Quality (requires restart)',
           ('The render size: Quality 1/1.5, Balanced 1/1.7, Performance 1/2, Ultra Performance 1/3 of the output '
            'on each side, upscaled by the upscaler. Applied at start.'),
@@ -149,7 +149,7 @@ MENU = [
            'only while the slow motion plays, then back. Or skip the slow motion. At 30 FPS nothing changes.'),
           choices=(('0', '30 FPS during slow motion (advised)'),
                    ('1', 'Skip the slow motion'))),
-    # Hack and fun (English only): the same text as the in-game Fun tab (tlg_fun.h DroolHelp).
+    # Hack and fun (English only): the same text as the in-game Extras tab (tlg_fun.h DroolHelp).
     _menu('Fun', 'trico_drool', 'choice', '0', "Trico's drool",
           "A feature the developers built and then switched off just before release: Trico drools. Always: a string of drool hangs from his beak the whole time. As the developers planned: it slowly grows while Trico smells something he wants, a smell-pot cart (s04_FirstAntenna and s10_Pit), and fades away when he loses interest (the boy's smell bottle was cut, so the carts are the only trigger). Stays on through jumps, new stages and extra Tricos, and is kept for the next start.",
           choices=(('0', 'Off (as released)'), ('1', 'Always'),
@@ -157,7 +157,7 @@ MENU = [
     _menu('Fun', 'trico_fur', 'int', '100', 'Trico fur and feather density',
           "How thick Trico's coat of fur and feathers is. Default 100% is as shipped (recommended); higher gives a fluffier Trico. Just for fun.",
           lo=0, hi=500, unit='%'),
-    # Mods (launcher Mods page, in-game Fun tab; tlg_lua.cpp Treasures / Horns). Same text as tlg_overlay.cpp.
+    # Mods (launcher Extras page, in-game Extras tab; tlg_lua.cpp Treasures / Horns). Same text as tlg_overlay.cpp.
     _menu('Fun', 'mod_treasures', 'bool', '0', 'All treasures',
           'Unlocks every treasure (outfits, Trico\'s feathers) and the Treasures entry in the options menu, '
           'with the developers\' own unlock. Stored in your save: turning it off does not take them back. '
@@ -167,6 +167,19 @@ MENU = [
           'The boy wears horns, a nod to Ico. '
           'Can be combined with the game\'s own Ico outfit (one of the treasures). '
           'Turn it on in the launcher once first: the launcher builds the horn models on your PC.'),
+    _menu('Fun', 'mod_foxtail', 'bool', '0', 'Foxtail toy',
+          'Unique to this port, recreated by us: the boy\'s foxtail toy, cut by the developers before release '
+          '(Trico\'s pounce for it stayed in the game). Foxtail grass is nekojarashi (猫じゃらし) in Japanese: '
+          '"cat teaser". Two Trico Tricks buttons use it: Foxtail (the boy holds it until you press it again) '
+          'and Foxtail play (he waves it and claps, Trico pounces). Our own model of a foxtail grass stalk. '
+          'Turn it on in the launcher once first: the launcher builds the model on your PC.'),
+    _menu('Fun', 'trico_helmet', 'choice', '0', "Trico's helmet",
+          "Puts a helmet on Trico, or takes it off, for the whole game. All are the game's own: the armour "
+          "helmet the armoured Tricos wear, a broken one, or the other Trico's mask. As in the "
+          'story (default) leaves it to the game. Stays on through cutscenes, new stages and loading a '
+          'save, and is kept for the next start.',
+          choices=(('0', 'As in the story (default)'), ('1', 'Armour helmet'), ('2', 'Broken helmet'),
+                   ('3', "The other Trico's mask"), ('4', 'No helmet'))),
     _menu('Fun', 'mod_plays', 'bool', '1', 'Trico plays',
           'A Trico behaviour the developers built and then sealed "for now": now and then he sniffs the boy '
           'and paws at him. It only happens where his cheek rubs can happen too, with the boy clear of ledges.'),
@@ -178,6 +191,10 @@ MENU = [
     _menu('Fun', 'mod_hints', 'bool', '0', 'Cut narrator hints',
           'The 23 narrator hints the developers cut in September 2016. On: when you seem stuck, the narrator '
           'helps again, where they first placed his lines. They give puzzle solutions away.'),
+    _menu('Fun', 'leaf_ao', 'choice', '0', 'Realistic tree shade',
+          'Tree crowns look flat and too bright: the light inside them has no shadow between the layers of '
+          'leaves. This darkens the light inside the crowns.',
+          choices=(('0', 'Off'), ('1', 'Low'), ('2', 'Medium'), ('3', 'High'), ('4', 'Extreme'))),
     _menu('Performance', 'frames_queued', 'choice', '1', 'Frames queued',
           'More frames queued: steadier FPS, slower response to input.',
           choices=(('1', '1 (lowest latency)'), ('2', '2'),
@@ -195,6 +212,11 @@ MENU = [
     _menu('Performance', 'keep_gpu_textures', 'bool', '1',
           'Keep GPU-only textures',
           'Keeps a texture the GPU drew into while its only correct copy is on the GPU (a game write right next to it blocks the copy back), until video memory is almost full. Without it, cleanup can throw that picture away and the game gets old data back. From SpartanPort (@maze1377). On by default; turn it off if video memory runs full more often.'),
+    _menu('Performance', 'shader_prebuild', 'bool', '1', 'Build shaders ahead',
+          ('At start, builds the shaders of the shader list that comes with the port in the background, so '
+           'places you see for the first time stutter less. The first start after an update or after '
+           'clearing the shader cache takes longer: loading a stage waits until the build is done. The list '
+           'holds only build recipes, no game code. Applies at the next start. On by default.')),
     _menu('Performance', 'arena_release', 'bool', '1',
           'Debug: give back freed buffer memory',
           'Since v0.5.2: when the game frees memory, its graphics card copy goes too. Test switch (issue #38): turn it off to check whether a problem started with v0.5.2. Off is the behaviour before v0.5.2. From the Shadow of the Colossus PC port (@AjncSystem, @Oussama268). Also in the in-game menu (Insert → Performance).'),

@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <vector>
+
 #include <boost/container/set.hpp>
 #include <boost/container/small_vector.hpp>
 #include "common/types.h"
@@ -15,6 +17,8 @@ namespace VkbShader {
 
 using PFN_SrtWalker = void PS4_SYSV_ABI (*)(const u32* /*user_data*/, u32* /*flat_dst*/);
 PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size);
+/// tlg (TLG_VKB_SHADER_PREBUILD): true and the bytes of `func` as generated, when it is the walker of this thread's last translation
+bool PristineWalkerCode(PFN_SrtWalker func, std::vector<u8>& out);
 
 struct PersistentSrtInfo {
     // Special case when fetch shader uses step rates.

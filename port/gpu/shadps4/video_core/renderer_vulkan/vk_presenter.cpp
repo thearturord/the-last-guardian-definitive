@@ -21,6 +21,7 @@
 #include "video_core/renderer_vulkan/vk_fsr_frame_gen.h"
 #include "video_core/renderer_vulkan/vk_temporal_upscaler.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
+#include "video_core/renderer_vulkan/shader_recipe.h"
 #include "video_core/renderer_vulkan/vk_warmup_inbox.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/texture_cache/image.h"
@@ -1317,6 +1318,9 @@ bool Presenter::PresentImage(Frame* frame, vk::Image source, bool last) {
 }
 
 void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame) {
+    if (is_game_frame) {
+        ShaderRecipe::NoteFrame(); // the slow-frame count of shaders built while playing
+    }
     // Free the frame for reuse
     const auto free_frame = [&] {
         if (!is_reusing_frame) {

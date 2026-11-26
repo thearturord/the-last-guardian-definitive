@@ -34,14 +34,42 @@ static const u8* g_srt_codegen_start = nullptr;
 // threads.
 static std::mutex g_srt_codegen_mutex;
 
+namespace {
+static bool SrtWalkerSignalHandler(void* context, void* fault_address);
+}
+// tlg (TLG_VKB_SHADER_PREBUILD): the walker this thread's last translation made, as made (a fault in a walker patches its code in place,
+// so the shader store keeps these bytes and not the code buffer's)
+static thread_local std::vector<u8> t_pristine_walker;
+static thread_local VkbShader::PFN_SrtWalker t_pristine_walker_func = nullptr;
+
+/// The fault handler of the walkers, installed with the first walker (mutex held)
+static void InstallSrtWalkerHandler() {
+    if (g_srt_codegen_start == nullptr) {
+        g_srt_codegen_start = g_srt_codegen.getCurr();
+        auto* signals = Core::Signals::Instance();
+        // Call after the memory invalidation handler
+        constexpr u32 priority = 1;
+        signals->RegisterAccessViolationHandler(SrtWalkerSignalHandler, priority);
+    }
+}
+
 namespace VkbShader {
 
 PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size) {
     std::scoped_lock lock{g_srt_codegen_mutex};
+    InstallSrtWalkerHandler(); // tlg: a walker read back from the shader store can be the session's first one
     const auto func_addr = (PFN_SrtWalker)g_srt_codegen.getCurr();
     g_srt_codegen.db(ptr, size);
     g_srt_codegen.ready();
     return func_addr;
+}
+
+bool PristineWalkerCode(PFN_SrtWalker func, std::vector<u8>& out) {
+    if (func == nullptr || func != t_pristine_walker_func) {
+        return false;
+    }
+    out = t_pristine_walker;
+    return true;
 }
 
 } // namespace VkbShader
@@ -652,13 +680,7 @@ static void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
     std::scoped_lock lock{g_srt_codegen_mutex};
 
     // Register the signal handler for SRT walker, if not already registered
-    if (g_srt_codegen_start == nullptr) {
-        g_srt_codegen_start = c.getCurr();
-        auto* signals = Core::Signals::Instance();
-        // Call after the memory invalidation handler
-        constexpr u32 priority = 1;
-        signals->RegisterAccessViolationHandler(SrtWalkerSignalHandler, priority);
-    }
+    InstallSrtWalkerHandler();
 
     info.srt_info.walker_func = c.getCurr<PFN_SrtWalker>();
     pass_info.dst_off_dw = NUM_USER_DATA_REGS;
@@ -673,6 +695,9 @@ static void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
 
     info.srt_info.walker_func_size =
         c.getCurr() - reinterpret_cast<const u8*>(info.srt_info.walker_func);
+    t_pristine_walker_func = info.srt_info.walker_func;
+    t_pristine_walker.assign(reinterpret_cast<const u8*>(info.srt_info.walker_func),
+                             reinterpret_cast<const u8*>(info.srt_info.walker_func) + info.srt_info.walker_func_size);
 
     if (EmulatorSettings.IsDumpShaders()) {
         DumpSrtProgram(info, reinterpret_cast<const u8*>(info.srt_info.walker_func),
@@ -877,6 +902,10 @@ namespace VkbShader {
 
 PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size) {
     UNREACHABLE_MSG("RegisterWalkerCode unimplemented for target architecture.");
+}
+
+bool PristineWalkerCode(PFN_SrtWalker, std::vector<u8>&) {
+    return false;
 }
 
 namespace Optimization {

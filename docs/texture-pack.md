@@ -10,7 +10,42 @@ set to *Off* (the default).
 
 ## Making a pack
 
-Follow the generator's README: set it up once, then
+**We advise building it from the launcher**: it downloads everything it needs, nothing has to be
+installed, and it checks disk space first. Building by hand with the generator is the fallback, for
+example when the launcher build does not work on your system.
+
+### From the launcher (experimental, advised)
+
+*Image* > *Texture pack* > **Build a texture pack… (experimental)**. Pick the graphics card kind
+and a pack name, then press **Start**. The launcher does the rest:
+
+1. It downloads a ready-made generator kit for your system and card, once. The kit holds Python,
+   PyTorch, the generator and texconv, and nothing gets installed. The kits come from the
+   generator's [`kit-v1` release](https://github.com/tabnul/ps4-texturepack-generator/releases/tag/kit-v1).
+2. It downloads the upscale model, 4x-UltraSharp, from its author
+   [Kim2091](https://huggingface.co/Kim2091/UltraSharp). Its license is CC BY-NC-SA 4.0, which allows
+   no commercial use.
+3. It builds the pack into the texture pack folder and selects it when it is done.
+
+| Card | Kit | Download / on disk |
+|---|---|---|
+| NVIDIA RTX 20 or newer | CUDA | Windows 1.9 / 4.7 GB, Linux 2.6 / 7.5 GB |
+| AMD (experimental) | Windows DirectML, Linux ROCm | Windows 0.2 / 1.4 GB, Linux 5.7 / 15.8 GB |
+| Other (GTX 10 and older, Intel) | CPU only | 0.1-0.2 / 0.7-1.4 GB; a build takes days |
+
+Before you start:
+- There is only **FULL** for now, which upscales *every* texture. **Light** (only the textures the
+  game draws larger than they are) is planned and will be the advised choice; the plan and progress
+  are in [issue #43](https://github.com/tabnul/the-last-guardian-definitive/issues/43).
+- **Disk**: about **160 GB** free while building. About **80 GB** stays once the pack is done.
+- **Time**: about 3 hours on an RTX 5090. AMD has not been timed yet, and the CPU kit takes days.
+  **Stop** ends the build; **Start** again later continues where it stopped.
+- The build uses the GPU fully and a lot of RAM (tested with 32 GB). Don't play while it runs.
+- The build log is `<pack name>.build.log` in the texture pack folder (*Open log*).
+
+### By hand (fallback)
+
+Use this if the launcher build does not work for you. Follow the generator's README: set it up once, then
 ```
 texpack make "D:\Games\CUSA03745" "D:\Packs\UltraSharp 4x"
 ```
@@ -38,10 +73,13 @@ Several packs can sit side by side (for example a 2x and a 4x one); you pick one
 Pack textures load when the game first draws them and are released again:
 - textures not drawn for **30 seconds** are freed (they reload when needed),
 - switching packs or setting *Off* frees all of them,
-- the pack never takes more than **16 GB**; beyond that, textures stay at the original quality.
+- the pack only uses video memory that is **free**. It loads new textures while the card is under
+  65 % full and frees pack textures again above 70 %, checking every 5 seconds. Beyond that,
+  textures stay at the original quality, and the game's own textures always come first.
+  `TLG_TEXPACK_BUDGET_MB` sets a fixed limit instead.
 
-On cards with 8 GB or less, a 2x pack (`--scale 2`) is the safer choice (a quarter of the memory
-per texture).
+On cards with 8 GB or less, on integrated graphics and on the Steam Deck, few pack textures may
+fit. A 2x pack (`--scale 2`) is the safer choice there (a quarter of the memory per texture).
 
 ## Troubleshooting
 

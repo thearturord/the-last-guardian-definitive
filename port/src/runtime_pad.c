@@ -3,12 +3,13 @@
  *
  * Default keyboard layout (TLG_KEY_MAP or tlg.ini key_map changes the buttons, see
  * apply_button_map):
- *   WASD left stick, arrow keys right stick, Space Cross (jump), LShift Circle, E Square,
+ *   WASD left stick, arrow keys right stick (move_* and camera_* in the key map), Space Cross (jump), LShift Circle, E Square,
  *   Q Triangle (grab), 1 L1, 3 R1 (call Trico), R L2, F R2, Z L3, C R3,
  *   Enter Options, Tab left touchpad (photo mode), Backspace right touchpad (pause menu),
  *   IJKL d-pad (I up, K down, J left, L right).
- *   T / G tilt and Y shakes the simulated motion sensor (sample_motion); Tab + arrows swipes
- *   the touchpad (apply_swipe).
+ *   T / G tilt and Y shakes the simulated motion sensor (sample_motion; tilt_right, tilt_left
+ *   and shake in the key map); the left touchpad key + the camera keys swipes the touchpad
+ *   (apply_swipe).
  * Mouse (while the window has it, see tlggpu_mouse_take; Esc releases it, a click takes it back):
  *   motion turns the camera (right stick, src/mouse_stick.h), left button Triangle (grab and
  *   hold on), right button R1 (call Trico), middle button Square. X1/X2 and the wheel are free
@@ -46,6 +47,12 @@ enum {
     /* Host-only sources, never shown to the game: a click on one side of the touchpad from a
      * button or key without a touch surface (play_click turns them into a touch and a click). */
     CLICK_LEFT=0x40000000, CLICK_RIGHT=0x80000000,
+    /* Keyboard-map actions that are no button (issue #104): the stick directions and the
+     * simulated motion sensor. Host-only as well; sample_host takes them out of the buttons. */
+    KEY_MOVE_UP=0x10000, KEY_MOVE_DOWN=0x20000, KEY_MOVE_LEFT=0x40000, KEY_MOVE_RIGHT=0x80000,
+    KEY_CAM_UP=0x200000, KEY_CAM_DOWN=0x400000, KEY_CAM_LEFT=0x800000, KEY_CAM_RIGHT=0x1000000,
+    KEY_TILT_RIGHT=0x2000000, KEY_TILT_LEFT=0x4000000, KEY_SHAKE=0x8000000,
+    KEY_ACTIONS=0x0fef0000,
 };
 typedef struct { uint16_t x, y; uint8_t id, reserve[3]; } PadTouch;
 typedef struct {
@@ -213,13 +220,19 @@ static SDL_Gamepad *current_gamepad(void) {
  * touchpad_left (alias touchpad) and touchpad_right are the two sides of the touchpad click:
  * photo mode and the pause menu. Back/View (Share on a DualSense) is the right click, and with
  * L1 held the left one; misc1 (Share on Xbox Series pads, Mute on a DualSense) is the left one too.
- * Sticks, triggers, the real touchpad click and the overlay shortcuts are
- * not remapped. */
+ * The keyboard map also has the stick directions and the motion keys: move_up/down/left/right
+ * (left stick), camera_up/down/left/right (right stick), tilt_right, tilt_left and shake.
+ * Gamepad sticks and triggers, the real touchpad click and the overlay shortcuts are not
+ * remapped. */
 static const struct { const char *name; uint32_t ps; } ps_names[]={
     {"cross",BTN_CROSS}, {"circle",BTN_CIRCLE}, {"square",BTN_SQUARE}, {"triangle",BTN_TRIANGLE},
     {"l1",BTN_L1}, {"r1",BTN_R1}, {"l2",BTN_L2}, {"r2",BTN_R2}, {"l3",BTN_L3}, {"r3",BTN_R3},
     {"options",BTN_OPTIONS}, {"touchpad",CLICK_LEFT}, {"touchpad_left",CLICK_LEFT}, {"touchpad_right",CLICK_RIGHT},
     {"up",BTN_UP}, {"down",BTN_DOWN}, {"left",BTN_LEFT}, {"right",BTN_RIGHT},
+    /* Keyboard map only (apply_button_map). */
+    {"move_up",KEY_MOVE_UP}, {"move_down",KEY_MOVE_DOWN}, {"move_left",KEY_MOVE_LEFT}, {"move_right",KEY_MOVE_RIGHT},
+    {"camera_up",KEY_CAM_UP}, {"camera_down",KEY_CAM_DOWN}, {"camera_left",KEY_CAM_LEFT}, {"camera_right",KEY_CAM_RIGHT},
+    {"tilt_right",KEY_TILT_RIGHT}, {"tilt_left",KEY_TILT_LEFT}, {"shake",KEY_SHAKE},
 };
 /* Mouse sources in the keyboard map: MOUSE_SOURCE + bit of TlgGpuMouse (SDL button - 1), then
  * the wheel directions (pulses, see sample_mouse). */
@@ -249,7 +262,22 @@ static ButtonMap key_map={{
     {SDL_SCANCODE_RETURN,BTN_OPTIONS}, {SDL_SCANCODE_TAB,CLICK_LEFT}, {SDL_SCANCODE_BACKSPACE,CLICK_RIGHT},
     {SDL_SCANCODE_I,BTN_UP}, {SDL_SCANCODE_K,BTN_DOWN}, {SDL_SCANCODE_J,BTN_LEFT}, {SDL_SCANCODE_L,BTN_RIGHT},
     {MOUSE_LEFT,BTN_TRIANGLE}, {MOUSE_RIGHT,BTN_R1}, {MOUSE_MIDDLE,BTN_SQUARE},
-},20};
+    {SDL_SCANCODE_W,KEY_MOVE_UP}, {SDL_SCANCODE_S,KEY_MOVE_DOWN}, {SDL_SCANCODE_A,KEY_MOVE_LEFT}, {SDL_SCANCODE_D,KEY_MOVE_RIGHT},
+    {SDL_SCANCODE_UP,KEY_CAM_UP}, {SDL_SCANCODE_DOWN,KEY_CAM_DOWN}, {SDL_SCANCODE_LEFT,KEY_CAM_LEFT}, {SDL_SCANCODE_RIGHT,KEY_CAM_RIGHT},
+    {SDL_SCANCODE_T,KEY_TILT_RIGHT}, {SDL_SCANCODE_G,KEY_TILT_LEFT}, {SDL_SCANCODE_Y,KEY_SHAKE},
+},31};
+/* What the keyboard map presses now: PS4 buttons and KEY_* actions. `mouse`: sample_mouse's bits. */
+static uint32_t key_map_pressed(const bool *k, uint32_t mouse) {
+    uint32_t pressed=0;
+    if (!k) return 0;
+    for (size_t i=0;i<key_map.count;++i) {
+        const int source=key_map.entries[i].source;
+        const bool down=source>=MOUSE_SOURCE ? source<MOUSE_SOURCE_END && (mouse>>(source-MOUSE_SOURCE) & 1)
+                                             : source<SDL_SCANCODE_COUNT && k[source];
+        if (down) pressed|=key_map.entries[i].ps;
+    }
+    return pressed;
+}
 
 static char *trim(char *text) {
     while (*text==' ' || *text=='\t') ++text;
@@ -292,6 +320,7 @@ static int apply_button_map(ButtonMap *map, const char *spec, bool keyboard) {
         entry=next;
         uint32_t ps=0;
         for (size_t i=0;i<sizeof(ps_names)/sizeof(*ps_names);++i) if (!SDL_strcasecmp(button,ps_names[i].name)) ps=ps_names[i].ps;
+        if (!keyboard) ps&=~(uint32_t)KEY_ACTIONS; /* the gamepad has its sticks and sensors */
         const bool none=!SDL_strcasecmp(names,"none");
         int sources[8], count=0;
         for (char *name=names, *bar; name && !none; name=bar) {
@@ -385,9 +414,10 @@ static void sample_motion(PadData *d, SDL_Gamepad *g, const bool *k) {
     /* Simulated tilt: target roll/pitch from keys or the modifier + right stick. */
     float roll=0, pitch=0;
     int shake=0, simulated=0;
-    if ((k && k[SDL_SCANCODE_T]) || (injected_motion & 1)) { roll=1.5708f; simulated=1; }
-    if ((k && k[SDL_SCANCODE_G]) || (injected_motion & 2)) { roll=-1.5708f; simulated=1; }
-    if ((k && k[SDL_SCANCODE_Y]) || (injected_motion & 4)) { shake=1; simulated=1; }
+    const uint32_t keys=key_map_pressed(k,0); /* keys only: the mouse is sampled later */
+    if ((keys & KEY_TILT_RIGHT) || (injected_motion & 1)) { roll=1.5708f; simulated=1; }
+    if ((keys & KEY_TILT_LEFT) || (injected_motion & 2)) { roll=-1.5708f; simulated=1; }
+    if ((keys & KEY_SHAKE) || (injected_motion & 4)) { shake=1; simulated=1; }
     if (g) {
         const int sticks=SDL_GetGamepadButton(g,SDL_GAMEPAD_BUTTON_LEFT_STICK) && SDL_GetGamepadButton(g,SDL_GAMEPAD_BUTTON_RIGHT_STICK);
         static int sensor_mode=-1; /* tlg_pc: off by default, see above */
@@ -444,10 +474,11 @@ static void sample_motion(PadData *d, SDL_Gamepad *g, const bool *k) {
     d->orientation[0]=motion.q.x; d->orientation[1]=motion.q.y; d->orientation[2]=motion.q.z; d->orientation[3]=motion.q.w;
 }
 /* Touchpad swipes for controllers without a touchpad ("Open Door": swipe right): hold View/
- * Select/- (gamepad) or Tab (keyboard) and push the right stick (arrow keys): a finger moves
+ * Select/- (gamepad) or the left touchpad key (keyboard: Tab) and push the right stick (the
+ * camera keys: arrows): a finger moves
  * from the middle of the pad toward that side. A quick tap without moving still clicks. */
 static struct { int active; } swipe;
-static void apply_swipe(PadData *d, SDL_Gamepad *g, const bool *k) {
+static void apply_swipe(PadData *d, SDL_Gamepad *g, uint32_t keys) {
     float x=0, y=0;
     int held=0;
     if (g && SDL_GetGamepadButton(g,SDL_GAMEPAD_BUTTON_BACK)) {
@@ -455,12 +486,12 @@ static void apply_swipe(PadData *d, SDL_Gamepad *g, const bool *k) {
         x=(float)SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHTX)/32767.f;
         y=(float)SDL_GetGamepadAxis(g,SDL_GAMEPAD_AXIS_RIGHTY)/32767.f;
     }
-    if (k && k[SDL_SCANCODE_TAB]) {
+    if (keys & CLICK_LEFT) {
         held=1;
-        if (k[SDL_SCANCODE_LEFT]) x=-1;
-        if (k[SDL_SCANCODE_RIGHT]) x=1;
-        if (k[SDL_SCANCODE_UP]) y=-1;
-        if (k[SDL_SCANCODE_DOWN]) y=1;
+        if (keys & KEY_CAM_LEFT) x=-1;
+        if (keys & KEY_CAM_RIGHT) x=1;
+        if (keys & KEY_CAM_UP) y=-1;
+        if (keys & KEY_CAM_DOWN) y=1;
     }
     if (!held) { swipe.active=0; return; }
     if (!swipe.active && x*x+y*y<0.09f) return; /* not moved yet: still a click */
@@ -571,18 +602,17 @@ static void sample_host(PadData *d) {
     /* The keyboard works with or without a gamepad: its buttons add to the pad's, and a stick
      * follows the keys only while one of them is held. */
     if (!k) return;
-    key_axis(&d->left_x,k[SDL_SCANCODE_A],k[SDL_SCANCODE_D]);
-    key_axis(&d->left_y,k[SDL_SCANCODE_W],k[SDL_SCANCODE_S]);
-    key_axis(&d->right_x,k[SDL_SCANCODE_LEFT],k[SDL_SCANCODE_RIGHT]);
-    key_axis(&d->right_y,k[SDL_SCANCODE_UP],k[SDL_SCANCODE_DOWN]);
+    /* The camera keys come before the mouse (its motion adds to them), so a mouse button or the
+     * wheel can move (left stick) but not turn the camera. */
+    const uint32_t held=key_map_pressed(k,0);
+    key_axis(&d->right_x,held & KEY_CAM_LEFT,held & KEY_CAM_RIGHT);
+    key_axis(&d->right_y,held & KEY_CAM_UP,held & KEY_CAM_DOWN);
     const uint32_t mouse=sample_mouse(d); /* adds to the right stick */
-    for (size_t i=0;i<key_map.count;++i) {
-        const int source=key_map.entries[i].source;
-        const bool down=source>=MOUSE_SOURCE ? source<MOUSE_SOURCE_END && (mouse>>(source-MOUSE_SOURCE) & 1)
-                                             : source<SDL_SCANCODE_COUNT && k[source];
-        if (down) d->buttons|=key_map.entries[i].ps;
-    }
-    apply_swipe(d,g,k); /* after the key map: Tab+arrows swipe instead of clicking */
+    const uint32_t keys=key_map_pressed(k,mouse);
+    key_axis(&d->left_x,keys & KEY_MOVE_LEFT,keys & KEY_MOVE_RIGHT);
+    key_axis(&d->left_y,keys & KEY_MOVE_UP,keys & KEY_MOVE_DOWN);
+    d->buttons|=keys & ~(uint32_t)KEY_ACTIONS;
+    apply_swipe(d,g,keys); /* after the key map: Tab+arrows swipe instead of clicking */
     if (d->buttons & BTN_L2) d->l2=255;
     if (d->buttons & BTN_R2) d->r2=255;
 }

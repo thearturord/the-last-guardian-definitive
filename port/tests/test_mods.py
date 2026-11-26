@@ -74,6 +74,7 @@ class ModTests(unittest.TestCase):
         self.assertEqual((self.assets / 'b.wad').read_bytes(), b'untouched')
         self.assertEqual(list((self.root / 'out').iterdir()), [])
 
+    @unittest.skipIf(os.name == 'nt', 'symbolic links need extra rights on Windows')
     def test_mod_symlinks_rejected(self):
         a = self.mod('A')
         (a / 'dvdroot_ps4/escape').symlink_to(self.assets, target_is_directory=True)

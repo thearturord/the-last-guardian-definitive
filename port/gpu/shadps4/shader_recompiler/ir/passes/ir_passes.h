@@ -3,6 +3,10 @@
 
 #pragma once
 
+#include <array>
+#include <atomic>
+#include <vector>
+
 #include "shader_recompiler/ir/basic_block.h"
 #include "shader_recompiler/ir/passes/resource_pass.h"
 #include "shader_recompiler/ir/program.h"
@@ -44,5 +48,22 @@ void SharedMemoryBarrierPass(IR::Program& program, const RuntimeInfo& runtime_in
 void SharedMemorySimplifyPass(IR::Program& program, const Profile& profile);
 void SharedMemoryToStoragePass(IR::Program& program, const RuntimeInfo& runtime_info,
                                const Profile& profile);
+
+/// tlg look option (TLG_LEAF_AO, off by default): ambient light inside tree crowns, see
+/// leaf_ambient_occlusion_pass.cpp
+enum class LeafAoResult : u32 { Applied, MismatchResources, MismatchWrite };
+constexpr u32 LeafAoResultCount = 3;
+constexpr std::array<const char*, LeafAoResultCount> LeafAoResultNames{
+    "applied", "mismatch_resources", "mismatch_write"};
+struct LeafAoStats {
+    std::array<std::atomic<u64>, LeafAoResultCount> results{};
+};
+struct LeafAoShader {
+    u64 hash{};
+    LeafAoResult result{};
+};
+void LeafAmbientOcclusionPass(IR::Program& program, const Profile& profile);
+LeafAoStats& LeafAoCounters();
+std::vector<LeafAoShader> LeafAoShaders();
 
 } // namespace Shader::Optimization

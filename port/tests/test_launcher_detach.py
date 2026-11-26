@@ -130,6 +130,7 @@ class LaunchTests(unittest.TestCase):
         self.assertNotIn('text', kwargs)
         self.assertTrue(Path(log).is_file())
 
+    @unittest.skipIf(os.name == 'nt', 'Linux only')
     def test_linux_has_its_own_session(self):
         _, _, call = self.launch()
         self.assertIs(True, call.kwargs['start_new_session'])
@@ -174,6 +175,7 @@ class TkPathTests(unittest.TestCase):
             self.assertRegex(log.read_text(encoding='utf-8'), r'\ABuild: \S+.*\nFrame rate: test\n\Z')
 
 
+@unittest.skipIf(os.name == 'nt', 'Linux only')
 class FileLimitTests(unittest.TestCase):
     def test_open_file_limit_goes_to_the_hard_maximum(self):
         import resource

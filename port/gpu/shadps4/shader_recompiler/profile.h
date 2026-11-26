@@ -54,6 +54,9 @@ struct Profile {
     bool needs_unorm_fixup{};
     bool needs_clip_distance_emulation{};
     bool supports_shader_stencil_export{};
+    /// tlg look option (TLG_LEAF_AO): ambient light inside tree crowns; strength 0 = off, radius
+    /// in metres, bit k = material entry k
+    u32 leaf_ao_materials{};
 
     bool operator==(const Profile&) const = default;
 };

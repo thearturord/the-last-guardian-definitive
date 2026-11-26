@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2026 TLG PC port
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -67,7 +68,13 @@ const XboxPicture XboxPictures[] = {
      "Controls screen"},
 };
 
-constexpr u64 Budget = 16ull << 30; ///< host VRAM for pack images; later loads are refused
+constexpr u64 Budget = 16ull << 30; ///< most video memory pack images ever take
+// The pack only uses video memory the game leaves free (HayatoG#104: a fixed 16 GB on an 8 GB
+// card pushed the game's own textures out). The game's texture collector starts at 70% of the
+// driver's budget (texture_cache.cpp GarbageCollectImages); the pack loads up to LoadShare of it,
+// all memory of the process counted, and frees its least recently used images above ShedShare.
+constexpr u64 LoadShare = 65, ShedShare = 70; ///< percent of the driver's current budget
+constexpr u32 RetrySeconds = 5; ///< a load put off for lack of room tries again after this
 constexpr u64 UploadPerFrame = 256ull << 20;
 constexpr u32 MaxLevels = 14;
 constexpr u32 EvictSeconds = 30; ///< pack images not bound for this long are freed
@@ -173,7 +180,8 @@ void TexturePack::Switch(int pack) {
         done.clear();
     }
     resident_bytes = 0;
-    hits = misses = refused = 0;
+    hits = misses = refused = no_room = shed = 0;
+    room = 0;
     last_report = now;
     active = pack;
     ++generation;
@@ -200,7 +208,55 @@ void TexturePack::Switch(int pack) {
             entries.emplace(key, std::move(entry));
         }
     }
-    std::printf("Texture pack: %s, %zu entries\n", dir.c_str(), entries.size());
+    UpdateRoom();
+    std::printf("Texture pack: %s, %zu entries, room %llu MB\n", dir.c_str(), entries.size(),
+                (unsigned long long)(room >> 20));
+}
+
+void TexturePack::UpdateRoom() {
+    if (!instance.CanReportMemoryUsage()) {
+        // No live figures from the driver: a third of the start-up budget.
+        const u64 limit = std::min(Budget, instance.GetTotalMemoryBudget() / 3);
+        room = limit > resident_bytes ? limit - resident_bytes : 0;
+        return;
+    }
+    // TLG_TEXPACK_BUDGET_MB=N (tests): the pack acts as if the driver's budget were N MB, so a
+    // large card shows what an 8 GB one would do.
+    static const u64 forced = [] {
+        const char* env = std::getenv("TLG_TEXPACK_BUDGET_MB");
+        return env && *env ? std::strtoull(env, nullptr, 10) << 20 : 0;
+    }();
+    const u64 budget = forced ? forced : instance.GetDeviceMemoryBudgetNow();
+    const u64 usage = instance.GetDeviceMemoryUsage(); // pack images included
+    const u64 load_limit = budget / 100 * LoadShare, shed_limit = budget / 100 * ShedShare;
+    room = std::min(load_limit > usage ? load_limit - usage : 0,
+                    Budget > resident_bytes ? Budget - resident_bytes : 0);
+    if (usage <= shed_limit) {
+        return;
+    }
+    // The game needs the memory: free the least recently used pack images down to the load
+    // limit. Frees happen once the GPU is done with them, within a frame or two.
+    std::vector<Entry*> ready;
+    for (auto& [key, entry] : entries) {
+        if (entry->state == Entry::State::Ready) {
+            ready.push_back(entry.get());
+        }
+    }
+    std::sort(ready.begin(), ready.end(),
+              [](const Entry* a, const Entry* b) { return a->last_used < b->last_used; });
+    u64 freed = 0;
+    for (Entry* entry : ready) {
+        if (freed >= usage - load_limit) {
+            break;
+        }
+        freed += entry->bytes;
+        entry->retry_at = now + RetrySeconds;
+        Free(*entry);
+        ++shed;
+    }
+    if (freed) {
+        ++generation; // memoized bindings must not keep the freed views
+    }
 }
 
 void TexturePack::Worker(std::stop_token stop) {
@@ -238,7 +294,7 @@ void TexturePack::XboxPad() {
         entry->width = picture.width;
         entry->height = picture.height;
         entry->file.assign(picture.begin, picture.end);
-        Upload(*entry);
+        Upload(*entry, false);
         if (entry->state == Entry::State::Ready) {
             resident_bytes -= entry->bytes; // the count is the pack's (Switch resets it)
         } else {
@@ -262,6 +318,9 @@ void TexturePack::Tick() {
     if (seconds != now) {
         now = seconds;
         Evict();
+        if (active) {
+            UpdateRoom();
+        }
         if (now % 10 == 0 && std::getenv("TLG_TEXPACK_VMA")) {
             // Whether freed pack images give memory back or VMA keeps the blocks.
             VmaTotalStatistics stats{};
@@ -294,9 +353,12 @@ void TexturePack::Tick() {
     if (active && now >= last_report + 60) {
         last_report = now;
         std::printf("Texture pack: %llu sampled from the pack, %llu without entry, %llu refused, "
-                    "%llu MB resident\n",
+                    "%llu MB resident, %llu MB room, %llu put off for room, %llu freed for the "
+                    "game\n",
                     (unsigned long long)hits, (unsigned long long)misses,
-                    (unsigned long long)refused, (unsigned long long)(resident_bytes >> 20));
+                    (unsigned long long)refused, (unsigned long long)(resident_bytes >> 20),
+                    (unsigned long long)(room >> 20), (unsigned long long)no_room,
+                    (unsigned long long)shed);
     }
 }
 
@@ -306,13 +368,7 @@ void TexturePack::Evict() {
         if (entry->state != Entry::State::Ready || now - entry->last_used < EvictSeconds) {
             continue;
         }
-        // Freed once the GPU is done with the frames that still sample it; loads again on use.
-        scheduler.DeferOperation(
-            [old = std::make_shared<std::pair<VideoCore::UniqueImage, decltype(entry->views)>>(
-                 std::move(entry->image), std::move(entry->views))] {});
-        entry->views.clear();
-        entry->state = Entry::State::Unloaded;
-        resident_bytes -= entry->bytes;
+        Free(*entry);
         evicted = true;
     }
     if (evicted) {
@@ -320,7 +376,17 @@ void TexturePack::Evict() {
     }
 }
 
-void TexturePack::Upload(Entry& entry) {
+void TexturePack::Free(Entry& entry) {
+    // Freed once the GPU is done with the frames that still sample it; loads again on use.
+    scheduler.DeferOperation(
+        [old = std::make_shared<std::pair<VideoCore::UniqueImage, decltype(entry.views)>>(
+             std::move(entry.image), std::move(entry.views))] {});
+    entry.views.clear();
+    entry.state = Entry::State::Unloaded;
+    resident_bytes -= entry.bytes;
+}
+
+void TexturePack::Upload(Entry& entry, bool limited) {
     entry.state = Entry::State::Failed;
     const auto& file = entry.file;
     u32 levels = 1;
@@ -344,9 +410,17 @@ void TexturePack::Upload(Entry& entry) {
                      .imageExtent = {w, h, 1}};
         total += u64((w + 3) / 4) * ((h + 3) / 4) * block_bytes;
     }
-    if (file.size() < DdsHeader + total || resident_bytes + total > Budget) {
+    if (file.size() < DdsHeader + total) {
         std::printf("Texture pack: cannot load %s\n", entry.path.c_str());
         entry.file = {};
+        return;
+    }
+    if (limited && total > room) {
+        // No room now: the original texture stays; tries again later (counted, not logged).
+        entry.file = {};
+        entry.state = Entry::State::Unloaded;
+        entry.retry_at = now + RetrySeconds;
+        ++no_room;
         return;
     }
     entry.image = VideoCore::UniqueImage(instance.GetDevice(), instance.GetAllocator());
@@ -395,6 +469,9 @@ void TexturePack::Upload(Entry& entry) {
     entry.file = {};
     entry.state = Entry::State::Ready;
     resident_bytes += total;
+    if (limited) {
+        room -= total;
+    }
     static const bool log = std::getenv("TLG_TEXPACK_LOG");
     if (log) {
         std::printf("Texture pack: loaded %s\n", entry.path.c_str());
@@ -436,7 +513,8 @@ vk::ImageView TexturePack::Sample(VideoCore::Image& image, const VideoCore::Imag
     }
     Entry& entry = *it->second;
     entry.last_used = now;
-    if (entry.state == Entry::State::Unloaded) {
+    // Without room the file is not even read: the original texture stays until room frees up.
+    if (entry.state == Entry::State::Unloaded && room > 0 && now >= entry.retry_at) {
         entry.state = Entry::State::Loading;
         std::scoped_lock lock{mutex};
         queue.push_back(it->second);

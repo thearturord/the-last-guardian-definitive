@@ -128,7 +128,7 @@ class Game:
 
     def __init__(self, env, tag):
         self.launched, self.tag, self.log, self.seen = time.time(), tag, None, []
-        full = dict(os.environ, TLG_SKIP_LOGOS="1", TLG_FPS="unlocked", TLG_HDR="0", TLG_FRAME_STATS="1",
+        full = dict(os.environ, TLG_SKIP_LOGOS="1", TLG_FPS="120", TLG_HDR="0", TLG_FRAME_STATS="1",
                     TLG_FRAME_STATS_MS="1000", TLG_LUA_EXEC=EXEC)
         full.update(env)
         subprocess.Popen([os.path.join(A.install, "Play The Last Guardian.exe")], cwd=A.install, env=full,

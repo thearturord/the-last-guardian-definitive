@@ -56,6 +56,9 @@ bool dlss_checked = false;
 int dlss_supported_file = -1;
 // dlss_fg_supported in tlg.ini: the game's last DLSS frame generation check, for the launcher (-1: none).
 int dlss_fg_supported_file = -1;
+// ConfigureXessSupport ran / xess_supported in tlg.ini (-1: none), as for DLSS.
+bool xess_checked = false;
+int xess_supported_file = -1;
 // The upscaler tlg.ini selected before a fallback to FSR 3.1 (-1: none): Save writes it back.
 int selected_upscaler = -1;
 // fsr4_default in tlg.ini: the one-time switch from FSR 3.1 to FSR 4 native AA on a card that
@@ -66,6 +69,7 @@ int fsr4_supported_file = -1;
 
 void DlssFallback(Values& v) {
     if (v.upscaler == UpscalerDlss && dlss_checked && !v.dlss_supported) FallBackToFsr3();
+    if (v.upscaler == UpscalerXess && xess_checked && !v.xess_supported) FallBackToFsr3();
 }
 
 void Set(Values& v, const std::string& key, const std::string& value) {
@@ -97,13 +101,16 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         return;
     }
     if (key == "menu_tab") {
-        v.menu_tab = i >= 0 && i <= 5 ? i : 0;
+        v.menu_tab = i >= 0 && i <= 6 ? i : 0;
         return;
     }
     if (key == "aa_row") {
         aa_row_file = i != 0;
     } else if (key == "dlss_supported") {
         dlss_supported_file = i != 0;
+        return;
+    } else if (key == "xess_supported") {
+        xess_supported_file = i != 0;
         return;
     } else if (key == "dlss_fg_supported") {
         dlss_fg_supported_file = i != 0;
@@ -121,6 +128,10 @@ void Set(Values& v, const std::string& key, const std::string& value) {
     }
     if (key == "audio_device") {
         v.audio_device = value;
+        return;
+    }
+    if (key == "trophy_key") {
+        v.trophy_key = value;
         return;
     }
     if (key == "pad_combo_quit" || key == "pad_combo_menu" || key == "pad_combo_qa" ||
@@ -201,6 +212,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.rcas = i != 0;
     } else if (key == "rcas_strength") {
         v.rcas_strength = TlgGraphics::ParseRcasStrength(value.empty() ? -1 : i);
+    } else if (key == "game_smaa") {
+        v.game_smaa = i != 0;
     } else if (key == "dlaa") {
         v.dlaa = i != 0;
     } else if (key == "level_select") {
@@ -252,10 +265,14 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.trico_fur = std::clamp(i, 0, 500);
     } else if (key == "trico_drool") {
         v.trico_drool = i == 1 || i == 2 ? i : 0;
+    } else if (key == "trico_helmet") {
+        v.trico_helmet = i >= 1 && i <= 4 ? i : 0;
     } else if (key == "button_icons") {
         v.button_icons = value == "playstation" ? 1 : value == "xbox" ? 2 : i == 1 || i == 2 ? i : 0;
     } else if (key == "hide_hints") {
         v.hide_hints = i != 0;
+    } else if (key == "trophy_popup") {
+        v.trophy_popup = i != 0;
     } else if (key == "trico_favourites") {
         v.trico_favourites = value;
     } else if (key == "trico_bar_group") {
@@ -264,14 +281,20 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.mod_treasures = i != 0;
     } else if (key == "mod_horns") {
         v.mod_horns = i != 0;
+    } else if (key == "mod_foxtail") {
+        v.mod_foxtail = i != 0;
     } else if (key == "mod_plays") {
         v.mod_plays = i != 0;
     } else if (key == "mod_throw_up") {
         v.mod_throw_up = i == 1 ? 1 : 0;
     } else if (key == "mod_hints") {
         v.mod_hints = i != 0;
+    } else if (key == "leaf_ao") {
+        v.leaf_ao = i < 0 ? 0 : i > 4 ? 4 : i;
     } else if (key == "keep_gpu_textures") {
         v.keep_gpu_textures = value.empty() || i != 0;
+    } else if (key == "shader_prebuild") {
+        v.shader_prebuild = value.empty() || i != 0;
     } else if (key == "arena_release") {
         v.arena_release = value.empty() || i != 0;
     } else if (key == "gc_live_budget") {
@@ -453,7 +476,7 @@ bool ReadFile(Values& v) {
     if (!file) {
         return false;
     }
-    char line[1024]; // key_map can be long
+    char line[2048]; // key_map can be long
     while (std::fgets(line, sizeof(line), file)) {
         std::string text{line};
         text.erase(text.find_last_not_of(" \t\r\n") + 1);
@@ -487,7 +510,8 @@ void Load() {
     // other upscalers, load as DLSS. The quality (preset) is the render size the launcher
     // patches in (startup); the menu keeps it for the next launch.
     if (!aa_row_file || (v.upscaler != UpscalerTaa && v.upscaler != UpscalerFsr3 &&
-                         v.upscaler != UpscalerFsr4 && v.upscaler != UpscalerOff)) {
+                         v.upscaler != UpscalerFsr4 && v.upscaler != UpscalerXess &&
+                         v.upscaler != UpscalerOff)) {
         v.upscaler = UpscalerDlss;
     }
     // tlg: the AA row is gone (2026-11-07); a file with AA off keeps its picture as Built-in.
@@ -519,15 +543,17 @@ void Load() {
         {"TLG_MOUSE_ACCEL", "mouse_accel"},          {"TLG_MOUSE_DEADZONE", "mouse_deadzone"},
         {"TLG_SMAA", "smaa"},                        {"TLG_DLAA", "dlaa"},
         {"TLG_LEVEL_SELECT", "level_select"},       {"TLG_TRICO_DROOL", "trico_drool"},
+        {"TLG_TRICO_HELMET", "trico_helmet"},
         {"TLG_BUTTON_ICONS", "button_icons"},
         {"TLG_HIDE_HINTS", "hide_hints"},
         {"TLG_MOD_TREASURES", "mod_treasures"},     {"TLG_MOD_HORNS", "mod_horns"},
         {"TLG_MOD_PLAYS", "mod_plays"},             {"TLG_MOD_THROW_UP", "mod_throw_up"},
-        {"TLG_MOD_HINTS", "mod_hints"},
+        {"TLG_MOD_HINTS", "mod_hints"},             {"TLG_MOD_FOXTAIL", "mod_foxtail"},
         {"TLG_CAS", "cas"},                          {"TLG_COLOR_ADJUST", "color_adjust"},
         {"TLG_HDR", "hdr"},                          {"TLG_FG", "frame_generation"},
         {"TLG_ARENA_RELEASE", "arena_release"},      {"TLG_GC_LIVE_BUDGET", "gc_live_budget"},
         {"TLG_SHADOW_DISTANCE", "shadow_distance"}, {"TLG_SHADOW_LITE", "shadow_lite"},
+        {"TLG_SHADER_PREBUILD", "shader_prebuild"},
     };
     for (const auto& [env, key] : env_keys) {
         if (const char* value = std::getenv(env); value && value[0]) {
@@ -556,6 +582,77 @@ void Load() {
     v.startup_deferred_readback = v.deferred_readback;
     v.startup_stale_readback = v.stale_readback;
     v.startup_hdr = v.hdr;
+    v.startup_shader_prebuild = v.shader_prebuild;
+}
+
+namespace {
+// TLG_LEAF_AO=<strength 0..1>[,<radius m>[,<material entry>...]] or "off", parsed once.
+struct LeafAoEnv {
+    bool set = false, off = false;
+    float strength = 0.0f, radius = 2.0f;
+    unsigned materials = 1u << 14; // the game's leaf cards
+};
+const LeafAoEnv& LeafAoFromEnv() {
+    static const LeafAoEnv env = [] {
+        LeafAoEnv r;
+        const char* e = std::getenv("TLG_LEAF_AO");
+        if (e == nullptr || *e == 0) {
+            return r;
+        }
+        if (std::strcmp(e, "off") == 0) {
+            r.off = true;
+            return r;
+        }
+        r.set = true;
+        float v[2]{0.0f, 2.0f};
+        unsigned materials = 0;
+        const char* p = e;
+        for (unsigned i = 0; *p != 0; ++i) {
+            char* end = nullptr;
+            const float x = std::strtof(p, &end);
+            if (end == p) {
+                break;
+            }
+            if (i < 2) {
+                v[i] = x;
+            } else if (x >= 0.0f && x < 32.0f) {
+                materials |= 1u << static_cast<unsigned>(x);
+            }
+            p = *end == ',' ? end + 1 : end;
+        }
+        r.strength = std::clamp(v[0], 0.0f, 1.0f);
+        r.radius = std::clamp(v[1], 0.1f, 10.0f);
+        if (materials != 0) {
+            r.materials = materials;
+        }
+        return r;
+    }();
+    return env;
+}
+} // namespace
+
+unsigned LeafAoMaterials() {
+    const auto& env = LeafAoFromEnv();
+    return env.off ? 0u : env.materials;
+}
+
+void LeafAoLive(float& strength, float& radius) {
+    const auto& env = LeafAoFromEnv();
+    if (env.set) {
+        strength = env.strength;
+        radius = env.radius;
+        return;
+    }
+    // low, medium, high, extreme
+    static constexpr float kLevels[4][2] = {{0.3f, 1.5f}, {0.5f, 2.0f}, {0.75f, 2.5f}, {1.0f, 4.0f}};
+    const int level = Get().leaf_ao.load(std::memory_order_relaxed);
+    if (level < 1 || level > 4) {
+        strength = 0.0f;
+        radius = 2.0f;
+        return;
+    }
+    strength = kLevels[level - 1][0];
+    radius = kLevels[level - 1][1];
 }
 
 bool GraphicsNeedRestart() {
@@ -727,6 +824,25 @@ void ConfigureDlssSupport(bool available, const char* problem) {
     if (!keys.empty()) WriteKeys(keys);
 }
 
+void ConfigureXessSupport(bool available, const char* problem) {
+    auto& v = Get();
+    v.xess_supported = available;
+    xess_checked = true;
+    if (xess_supported_file != int(available)) {
+        // Only this line changes: the launcher greys XeSS out from it.
+        if (WriteKeys({{"xess_supported", std::to_string(int(available))}}))
+            xess_supported_file = available;
+    }
+    static std::string kept;
+    kept = problem ? problem : "";
+    v.xess_problem = available || kept.empty() ? nullptr : kept.c_str();
+    if (v.upscaler == UpscalerXess && !available) {
+        std::printf("Upscaler: XeSS unavailable (%s); falling back to FSR 3.1\n",
+                    kept.empty() ? "libxess.dll missing" : kept.c_str());
+        FallBackToFsr3();
+    }
+}
+
 void FallBackToFsr3() {
     auto& v = Get();
     if (v.upscaler != UpscalerFsr3) selected_upscaler = v.upscaler;
@@ -749,8 +865,10 @@ void SetUpscaler(int upscaler) {
     auto& v = Get();
     v.upscaler = std::clamp(upscaler, 0, UpscalerCount - 1);
     v.dlaa = v.upscaler != UpscalerOff;
+    v.game_smaa = true;  // the AA row's Off sets it false after this call
     selected_upscaler = -1;
     if (v.upscaler == UpscalerDlss && !v.dlss_supported) FallBackToFsr3();
+    if (v.upscaler == UpscalerXess && !v.xess_supported) FallBackToFsr3();
 }
 
 bool FixedRenderSession() {
@@ -821,7 +939,9 @@ void Save() {
                  int(v.restart_unconfirmed.load()));
     std::fprintf(file, "frame_generation=%d\n", v.frame_generation.load());
     std::fprintf(file, "audio_device=%s\naudio_surround=%d\n", v.audio_device.c_str(), int(v.audio_surround.load()));
+    std::fprintf(file, "trophy_key=%s\ntrophy_popup=%d\n", v.trophy_key.c_str(), int(v.trophy_popup.load()));
     std::fprintf(file, "keep_gpu_textures=%d\n", int(v.keep_gpu_textures.load()));
+    std::fprintf(file, "shader_prebuild=%d\n", int(v.shader_prebuild.load()));
     std::fprintf(file, "arena_release=%d\ngc_live_budget=%d\n", int(v.arena_release.load()),
                  int(v.gc_live_budget.load()));
     std::fprintf(file,
@@ -835,6 +955,7 @@ void Save() {
                  int(v.dlaa.load()),v.shadow_scale.load(), int(v.smaa.load()),
                  int(v.color_adjust.load()), v.brightness.load(), v.contrast.load(),
                  v.saturation.load(), v.color_gamma.load());
+    std::fprintf(file, "game_smaa=%d\n", int(v.game_smaa.load()));
     std::fprintf(file, "level_select=%d\n", int(v.level_select.load()));
     std::fprintf(file, "photo_hdr=%d\n", int(v.photo_hdr.load()));
     std::fprintf(file, "pad_combo_quit=%s\npad_combo_menu=%s\npad_combo_qa=%s\npad_combo_photo=%s\n",
@@ -849,15 +970,17 @@ void Save() {
                  ComboText(v.photo_world).c_str(), ComboText(v.photo_sticks).c_str(),
                  int(v.photo_invert_y.load()));
     std::fprintf(file, "trico_drool=%d\n", v.trico_drool.load());
+    std::fprintf(file, "trico_helmet=%d\n", v.trico_helmet.load());
     std::fprintf(file, "trico_fur=%d\n", v.trico_fur.load());
     std::fprintf(file, "button_icons=%d\nhide_hints=%d\n", v.button_icons.load(),
                  int(v.hide_hints.load()));
     std::fprintf(file, "trico_favourites=%s\ntrico_bar_group=%d\n", v.trico_favourites.c_str(),
                  v.trico_bar_group.load());
-    std::fprintf(file, "mod_treasures=%d\nmod_horns=%d\n", int(v.mod_treasures.load()),
-                 int(v.mod_horns.load()));
+    std::fprintf(file, "mod_treasures=%d\nmod_horns=%d\nmod_foxtail=%d\n", int(v.mod_treasures.load()),
+                 int(v.mod_horns.load()), int(v.mod_foxtail.load()));
     std::fprintf(file, "mod_plays=%d\nmod_throw_up=%d\nmod_hints=%d\n", int(v.mod_plays.load()),
                  v.mod_throw_up.load(), int(v.mod_hints.load()));
+    std::fprintf(file, "leaf_ao=%d\n", v.leaf_ao.load());
     for (const auto& [name, member] : EffectKeys)
         std::fprintf(file, "%s=%d\n", name, (v.*member).load());
     std::fprintf(file, "fov=%d\n", v.fov.load());
@@ -867,6 +990,8 @@ void Save() {
                  pack > 0 ? TexturePackNames()[pack - 1].c_str() : "off");
     if (dlss_checked || dlss_supported_file >= 0)
         std::fprintf(file, "dlss_supported=%d\n", dlss_checked ? int(v.dlss_supported.load()) : dlss_supported_file);
+    if (xess_checked || xess_supported_file >= 0)
+        std::fprintf(file, "xess_supported=%d\n", xess_checked ? int(v.xess_supported.load()) : xess_supported_file);
     if (const int fg = v.dlss_fg_supported >= 0 ? v.dlss_fg_supported.load() : dlss_fg_supported_file; fg >= 0)
         std::fprintf(file, "dlss_fg_supported=%d\n", fg);
     if (fsr4_supported_file >= 0) std::fprintf(file, "fsr4_supported=%d\n", fsr4_supported_file);
@@ -983,6 +1108,7 @@ void ApplyGraphicsPreset(int index) {
     // dlaa=1 on Built-in picks the card's best upscaler.
     if (!v.dlaa && SelectedUpscaler() != UpscalerOff) SetUpscaler(UpscalerOff);
     if (v.dlaa && v.upscaler == UpscalerOff) SetUpscaler(DefaultAaUpscaler());
+    v.game_smaa = true;  // Stock is the game as shipped: its own SMAA (launcher preset_picked too)
 }
 
 int MatchingGraphicsPreset() {
@@ -1042,7 +1168,7 @@ void PresetRenderSize(int preset, int output_width, int output_height, int& widt
 }
 
 const char* UpscalerName(int upscaler) {
-    static constexpr const char* names[UpscalerCount] = {"off", "fsr3", "fsr4", "fsr411", "taa", "dlss"};
+    static constexpr const char* names[UpscalerCount] = {"off", "fsr3", "fsr4", "fsr411", "taa", "dlss", "xess"};
     return names[std::clamp(upscaler, 0, UpscalerCount - 1)];
 }
 
@@ -1050,6 +1176,7 @@ int AaModeOf() {
     const auto& v = Get();
     if (!AaOn() || v.upscaler == UpscalerTaa || v.upscaler == UpscalerOff) return AaOff;
     if (v.upscaler == UpscalerFsr3) return AaFsr3Native;
+    if (v.upscaler == UpscalerXess) return AaXessNative;
     return v.upscaler == UpscalerFsr4 ? AaFsr4Native : AaDlaa;
 }
 
@@ -1058,7 +1185,10 @@ void SetAaMode(int mode) {
     mode = std::clamp(mode, 0, AaModeCount - 1);
     v.dlaa = mode != AaOff;
     if (mode == AaOff) return;
-    v.upscaler = mode == AaDlaa ? UpscalerDlss : mode == AaFsr4Native ? UpscalerFsr4 : UpscalerFsr3;
+    v.upscaler = mode == AaDlaa         ? UpscalerDlss
+                 : mode == AaFsr4Native ? UpscalerFsr4
+                 : mode == AaXessNative ? UpscalerXess
+                                        : UpscalerFsr3;
     selected_upscaler = -1;
     v.preset = NativeAA;
 }
@@ -1066,11 +1196,13 @@ void SetAaMode(int mode) {
 bool AaModeSupported(int mode) {
     if (mode == AaDlaa) return Get().dlss_supported;
     if (mode == AaFsr4Native) return Get().fsr4_supported;
+    if (mode == AaXessNative) return Get().xess_supported;
     return true;
 }
 
 const char* AaModeName(int mode) {
-    static constexpr const char* names[AaModeCount] = {"Off", "DLAA", "FSR 3.1 Native AA", "FSR 4 Native AA"};
+    static constexpr const char* names[AaModeCount] = {"Off", "DLAA", "FSR 3.1 Native AA", "FSR 4 Native AA",
+                                                                "XeSS Native AA"};
     return names[std::clamp(mode, 0, AaModeCount - 1)];
 }
 

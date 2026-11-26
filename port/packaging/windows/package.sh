@@ -82,6 +82,11 @@ elif [[ -n ${TLG_REQUIRE_DLSS:-} ]]; then
 else
     echo 'No DLSS bridge in out/ (build_dlss.sh not run): packaging without DLAA'
 fi
+# XeSS (issue #62, Windows only): Intel's unmodified libxess.dll from the pinned SDK release, with
+# Intel's license. Without it the XeSS choices are greyed out and the game runs FSR 3.1.
+bash tools/fetch_xess.sh
+cp out/libxess.dll out/XESS-LICENSE.txt "$dest/out/"
+echo "Packaged XeSS: libxess.dll"
 # FSR 4 native AA: the open FSR 4 v07 model (MIT; AMD FidelityFX SDK source, assets built by
 # @FireBurn's Q2RTX, run by his UniversalScalers-Vulkan; packaging after @FelipePrado0's SpartanPort).
 # Only the native model: the anti-aliasing row runs no other. Without it FSR 4 runs as FSR 3.1.
@@ -94,6 +99,11 @@ if [[ -d fsr4_shaders/opt ]]; then
     cp fsr4_shaders/opt/*native* "$dest/fsr4_shaders/opt/" 2>/dev/null || true
 fi
 cp fsr4_shaders/LICENSE-FSR4-v07.txt "$dest/"
+# The shader list: the game finds it in shader-list/ one folder above out/ (ShaderList::Path),
+# so the first start builds the known shaders in the background. Recipes only, no game code.
+[[ -f shader-list/shaders.tlgsl ]] || { echo 'shader-list/shaders.tlgsl is missing' >&2; exit 1; }
+mkdir -p "$dest/shader-list"
+cp shader-list/*.tlgsl "$dest/shader-list/"
 cp -r scripts "$dest/"
 find "$dest" -name __pycache__ -prune -exec rm -r {} +
 cp LICENSE packaging/README-player.md "$dest/"

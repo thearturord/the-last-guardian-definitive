@@ -6,6 +6,7 @@ Game folder, game and interface language, display, FPS overlay, VRAM budget and 
 Play starts the game through tlg_run.py (the same code path as run_tlg.sh) and shows its log.
 Settings live in ~/.config/tlg-launcher/settings.json (%APPDATA% on Windows).
 """
+import atexit
 import locale
 import os
 import re
@@ -30,6 +31,7 @@ import logtail  # noqa: E402
 import pad_page  # noqa: E402
 import preset_share  # noqa: E402
 import tlg_run  # noqa: E402
+import trophy_key  # noqa: E402
 import update_check  # noqa: E402
 import savemanager  # noqa: E402,F401  (puts scripts/ on sys.path)
 import soundtrack  # noqa: E402
@@ -54,7 +56,7 @@ TEXT = {
     'home_advanced': 'Advanced',
     'home_controller': 'Controller',
     'home_keys': 'Keys & mouse',
-    'home_mods': 'Mods & cheats',
+    'home_mods': 'Extras',
     'home_video': 'Video',
     'home_controls': 'Controls',
     'mouse_section': 'Mouse',
@@ -100,6 +102,19 @@ TEXT = {
     'flag_granule': 'Group buffer memory',
     'flag_granule_hint': "Fix for issue #79: takes buffer memory from the graphics driver in larger pieces instead of many small ones. Older AMD cards on Windows can crash with \"out of memory\" without it. On by default.",
     'flags_game': 'Experimental game fixes',
+    'game_trophy_test': 'Trophy test',
+    'game_trophy_test_hint': 'Test only: 20 seconds after the start the next trophy unlocks, so you can see the pop-up and the Trophies tab in the menu. Test unlocks go to trophies_test.txt, not into your real trophy list. Off by default.',
+    'trophies_section': 'Trophies',
+    'trophy_key': 'PS4 trophy key',
+    'trophy_key_save': 'Use key',
+    'trophy_popup': 'Pop-up and sound on unlock',
+    'trophy_popup_note': 'Trophy names need the trophy key. Without it the pop-up only shows a number.',
+    'trophy_key_ok': 'Key works: {names} trophy names found. Saved.',
+    'trophy_key_wrong': 'This key does not open the trophy file. Not saved.',
+    'trophy_key_format': 'A key is 32 hex digits (0-9, A-F). Not saved.',
+    'trophy_key_nofile': 'Saved, but not checked: no trophy file in the game folder.',
+    'trophy_key_cleared': 'Key removed: the trophies are numbered.',
+    'trophy_key_hint': 'Optional: the PS4 trophy key (32 hex digits) shows the trophy names. The port does not include it. Also in the in-game menu (Trophies tab).',
     'game_tail_climb': "Trico's tail climbing fix",
     'game_tail_climb_hint': "Experimental: the boy should no longer climb in place on Trico's moving tail. Changes the game's climbing code, so it works on every graphics card. Not fully tested: letting go, shake-offs, ropes and chains may behave differently. By @YsraEstudos. On by default.",
     'flags_rdna': 'RDNA2: possible improvements',
@@ -213,16 +228,20 @@ TEXT = {
     'fps_60': '60 FPS',
     'fps_120': '120 FPS',
     'fps_unlocked': 'Unlocked (up to the display)',
+    'fps_unlocked_warning': 'Warning: Unlocked breaks certain scenes. Only for testing and benchmarking.',
     'fps_hint': ('60/unlocked patch eboot 1.03 in memory. Unlocked lowers the base frame rate by about '
                  '10 FPS against 60 at the same spot; pick 60 unless your PC runs well above 60'),
     'skip_logos': 'Skip the boot logos',
     'auto_continue': 'Auto continue (skip the title screen, load the last save)',
     'horns_built': 'The horn models are built on this PC.',
     'horns_failed': 'Could not build the horn models: {error}',
+    'foxtail_built': 'The foxtail model is built on this PC.',
+    'foxtail_failed': 'Could not build the foxtail model: {error}',
     'update_check': 'Check for new releases at start',
     'update_available': 'New release {tag} is out: click to open the download page',
     'old_version': 'Game version {version}: install update 01.03 (the port is made for it)',
     'fps_unsupported': 'eboot.bin is not the 1.03 game code: 60 FPS and Unlocked do not work, the game runs at 30 FPS (see the README)',
+    'untested_disc': 'Untested game version ({serial}): it may not work fully. Please share your log if something goes wrong',
     'debug': 'Debug (at start)',
     'bench_title': 'Benchmark',
     'bench_text': ('Measures how fast the game runs on this PC, scene by scene, all by itself: each scene is '
@@ -294,11 +313,13 @@ TEXT = {
     'up_fsr3': 'FSR 3.1 (any card)',
     'up_fsr4': 'FSR 4 (any recent card)',
     'up_taa': 'TAA (any card)',
+    'up_xess': 'XeSS (Intel, Windows)',
     'aa': 'Anti-aliasing',
-    'aa_game': "Off (game's own)",
+    'aa_game': "Game's own (SMAA)",
     'aa_dlaa': 'DLAA (NVIDIA RTX)',
-    'aa_hint': "Smooths jagged edges. Yours to choose with Upscale method Off; an upscaler does its own. DLAA (NVIDIA RTX cards) and FSR 4 (any recent card) are the sharpest, FSR 3.1 runs on any card, TAA is lighter and softer. Off keeps only the game's own.",
-    'upscaler_hint': "How the image gets its size. Off: drawn at the screen's size. Built-in, DLSS, FSR 3.1 and FSR 4: drawn smaller and enlarged, for more speed; DLSS needs an NVIDIA RTX card, FSR 4 any recent card (not only AMD; sharper and steadier than FSR 3.1), FSR 3.1 runs on any card, Built-in is the game's own upscale pass. An upscaler also smooths the edges itself. F8 switches between Built-in and your choice in game.",
+    'aa_xess': 'XeSS Native AA (Windows)',
+    'aa_hint': "Smooths jagged edges. Yours to choose with Upscale method Off; an upscaler does its own. DLAA (NVIDIA RTX cards) and FSR 4 (any recent card) are the sharpest, XeSS Native AA (any recent card, Windows only) is close, FSR 3.1 runs on any card, TAA is lighter and softer. Game's own keeps only the game's SMAA, Off smooths nothing.",
+    'upscaler_hint': "How the image gets its size. Off: drawn at the screen's size. Built-in, DLSS, FSR 3.1, FSR 4 and XeSS: drawn smaller and enlarged, for more speed; DLSS needs an NVIDIA RTX card, FSR 4 any recent card (not only AMD; sharper and steadier than FSR 3.1), XeSS any recent card on Windows (best on Intel Arc), FSR 3.1 runs on any card, Built-in is the game's own upscale pass. An upscaler also smooths the edges itself. F8 switches between Built-in and your choice in game.",
     'quality': 'Upscale quality',
     'preset_native': 'Off',
     'preset_quality': 'Quality',
@@ -315,6 +336,7 @@ TEXT = {
     'fg_blocked': 'Off: the game runs at 30 FPS (frame rate or frame rate limit), too low for frame generation. Your choice comes back at a higher frame rate.',
     'aa_no_dlss': 'No DLSS on this GPU: it runs as FSR 3.1',
     'aa_no_fsr4': 'This GPU cannot run FSR 4: it runs as FSR 3.1',
+    'aa_no_xess': 'XeSS is not available here (Windows only, needs libxess.dll): it runs as FSR 3.1',
     'sharpening': 'Sharpening',
     'sharpening_hint': ('Sharpens the image. With DLSS, FSR or TAA it is their own sharpening (scene only); with '
                         "Built-in it is AMD CAS on the final picture. Up to 100% the upscaler's own sharpening; "
@@ -361,6 +383,63 @@ TEXT = {
     'texture_pack_dialog_hint': ("AI-upscaled versions of the game's textures, made from your own copy of the game "
                                  '(ps4-texturepack-generator, docs/texture-pack.md); the game files are not changed. In game it '
                                  'switches live; textures appear as they load (a second or two).'),
+    'texbuild_button': 'Build a texture pack… (experimental)',
+    'texbuild_title': 'Build a texture pack (experimental)',
+    'texbuild_experimental': ('EXPERIMENTAL: this is new. It can fail, take far longer than expected, or change in a '
+                              'later version.'),
+    'texbuild_text': ("Makes an AI-upscaled texture pack from your own copy of the game, on your own PC; the game "
+                      'files are not changed. For now it upscales EVERY texture (FULL). A lighter build that only '
+                      'upscales the textures that need it is coming, and will be the advised way.'),
+    'texbuild_full': 'FULL: upscale everything',
+    'texbuild_light': 'Light: advised (coming later)',
+    'texbuild_gpu': 'Runs on',
+    'texbuild_gpu_nvidia': 'Nvidia graphics card (RTX 20 or newer)',
+    'texbuild_gpu_amd_windows': 'AMD or Intel graphics card (DirectML, experimental)',
+    'texbuild_gpu_amd_linux': 'AMD graphics card (ROCm, experimental)',
+    'texbuild_gpu_cpu': 'Processor only (takes days)',
+    'texbuild_detecting': 'Looking for your graphics card…',
+    'texbuild_found_nvidia': 'Found an Nvidia RTX card.',
+    'texbuild_found_nvidia_old': ('This Nvidia card is older than RTX 20: the Nvidia kit does not run on it. Pick '
+                                  '"Processor only", or try anyway?'),
+    'texbuild_found_amd': 'Found an AMD card. AMD is experimental and untested so far.',
+    'texbuild_found_none': 'No Nvidia card found. Check the choice above.',
+    'texbuild_name': 'Pack name',
+    'texbuild_warnings': ('Before you start:\n'
+                          '• Disk: needs about {peak} GB free in the texture packs folder while it builds; about '
+                          '{pack} GB stays when it is done.\n'
+                          '• Download: a ready-made tool kit (Python, PyTorch, texconv; a few GB) and the upscale '
+                          'model (64 MB, by Kim2091, CC BY-NC-SA 4.0: not for commercial use). Nothing is installed.\n'
+                          '• Time: about 3 hours on an RTX 5090. Slower cards take longer, AMD is untested, '
+                          'processor only takes days. You can stop and continue later.\n'
+                          '• While it builds: the graphics card runs at full load and it uses a lot of system '
+                          'memory (tested with 32 GB). Do not play at the same time.\n'
+                          '• While you play: the pack only uses video memory the game leaves free, and gives it '
+                          'back when the game needs it. With 8 GB of video memory or less, integrated graphics or '
+                          'a Steam Deck, you may see few upscaled textures.'),
+    'texbuild_free': 'Free now: {free} GB in {folder}',
+    'texbuild_start': 'Start',
+    'texbuild_stop': 'Stop',
+    'texbuild_open_log': 'Open log',
+    'texbuild_fetching': 'Getting the kit list…',
+    'texbuild_ready': 'Not started.',
+    'texbuild_downloading': 'Downloading {what}: {percent}%',
+    'texbuild_unpacking': 'Unpacking the kit…',
+    'texbuild_scanning': 'Listing the textures…',
+    'texbuild_upscale': 'Upscaling: {done} of {total} textures',
+    'texbuild_encode': 'Compressing: {done} of {total} textures',
+    'texbuild_done': 'Done: pack "{name}" is picked. Start the game to see it.',
+    'texbuild_failed': 'Stopped with an error; see the log: {log}',
+    'texbuild_error': 'Could not go on: {error}',
+    'texbuild_stopped': 'Stopped. Start again to continue where it stopped.',
+    'texbuild_no_game': 'Set the game folder first (Settings).',
+    'texbuild_zar': 'This needs the game as a folder; a packed game (.zar) cannot be read for this yet.',
+    'texbuild_bad_name': 'Use a name of letters, digits, spaces, - _ or . (up to 60).',
+    'texbuild_exists': 'A finished pack "{name}" is already there. Pick another name, or delete that folder first.',
+    'texbuild_low_space': ('Not enough free space: about {need} GB is needed, {free} GB is free in {folder}. '
+                           'The build will stop when the disk is full. Start anyway?'),
+    'texbuild_confirm': ('Start the FULL build? It downloads about {kit} GB now (0 if the kit is already here), then '
+                         'needs up to {peak} GB in {folder} and runs for hours.'),
+    'texbuild_close_running': 'The build is running. Stop it? It continues where it stopped when you start it again.',
     'close': 'Close',
     'mark_default': 'Default: {value}',
     'mark_default_button': 'Default',
@@ -393,6 +472,13 @@ TEXT = {
     'rep_no_events': 'No Fault:, STOP: or FREEZE: lines in this log.',
     'rep_issue_title': 'Problem report: {gpu}',
     'report_busy': 'Collecting the report…',
+    'disc_check': 'Check game disc',
+    'disc_check_busy': 'Checking the game files…',
+    'disc_check_no_game': 'Pick the game folder first (Settings > Game folder).',
+    'disc_check_done': 'Disc check saved as {file} in the logs folder. Send that file or the copied text to the developers.',
+    'disc_check_copy': 'Copy',
+    'disc_check_copied': 'Copied: paste it in your GitHub issue or message.',
+    'disc_check_open': 'Open file',
     'report_done': 'Issue form opened in the browser. Attach {zip} from the logs folder (log with user names removed).',
     'clear_cache': 'Clear shader cache',
     'clear_cache_ask': ('This deletes the compiled shaders ({size}); the next start takes longer to load and '
@@ -401,7 +487,7 @@ TEXT = {
     'clear_cache_done': 'Shader cache cleared: {size} freed.',
     'clear_cache_failed': ('{size} freed, but {count} file(s) could not be deleted (in use? Close the game '
                            'and try again).'),
-    'mods': 'Mods / Cheats…',
+    'mods': 'Extras…',
     'menu_note': ("Two menus in game. Insert: the port's graphics menu (every setting applies live). "
                   "Development menu (the game's own QA menu): turn on 'Level select and QA menu' under Debug, "
                   'then in game hold L1 and press L3 (keyboard: hold 1, press Z).'),
@@ -495,7 +581,7 @@ TEXT = {
     'effect_fov_hint': 'Camera field of view. Default 70° is as shipped; higher shows more around the boy.',
     'effect_trico_feathers': 'Trico feather wind',
     'effect_trico_feathers_hint': "How strongly the wind moves Trico's feathers. Default 100% is as shipped; 0% keeps them still.",
-    'mods_title': 'Mods / Cheats',
+    'mods_title': 'Extras',
     'mods_hint': ('Drop shadPS4/GoldHEN cheat XML files in the mods folder, then turn them on here. '
                   'Nothing here changes the game until you enable it.'),
     'mods_warning': 'A cheat can crash the game or behave oddly; if that happens, turn it off here.',
@@ -539,6 +625,13 @@ PS4_BUTTONS = [
     ('touchpad_left', 'Touchpad (left)', 'photo mode'),
     ('touchpad_right', 'Touchpad (right)', 'pause'),
     ('up', 'D-pad up', None), ('down', 'D-pad down', None), ('left', 'D-pad left', None), ('right', 'D-pad right', None),
+    # Not buttons: the sticks and the motion sensor from the keyboard (issue #104).
+    ('move_up', 'Left stick up', 'move forward'), ('move_down', 'Left stick down', 'move back'),
+    ('move_left', 'Left stick left', 'move left'), ('move_right', 'Left stick right', 'move right'),
+    ('camera_up', 'Right stick up', 'camera up'), ('camera_down', 'Right stick down', 'camera down'),
+    ('camera_left', 'Right stick left', 'camera left'), ('camera_right', 'Right stick right', 'camera right'),
+    ('tilt_right', 'Tilt controller right', None), ('tilt_left', 'Tilt controller left', None),
+    ('shake', 'Shake controller', None),
 ]
 # Tk key names -> SDL key names (src/runtime_pad.c reads SDL names); letters and digits are the same.
 TK_TO_SDL = {
@@ -572,14 +665,20 @@ INI_DEFAULTS = {'smaa': '0', 'sharpen': '1', 'sharpness': '1.75', 'color_adjust'
 # on any card; off is the game's own upscale pass. At Native AA quality the upscaler is the
 # anti-aliasing, below it the upscaler is too (no separate AA checkbox; dlaa = not Built-in).
 # TAA (2026-11-07): our own light temporal AA at native size, between SMAA and DLAA in cost.
-UPSCALERS = [('up_off', 'off'), ('up_dlss', 'dlss'), ('up_fsr3', 'fsr3'), ('up_fsr4', 'fsr4'), ('up_taa', 'taa')]
+# XeSS (issue #62): Intel's libxess.dll, Windows only; the game checks it as DLSS and FSR 4.
+UPSCALERS = [('up_off', 'off'), ('up_dlss', 'dlss'), ('up_fsr3', 'fsr3'), ('up_fsr4', 'fsr4'), ('up_taa', 'taa'),
+             ('up_xess', 'xess')]
 # The Video page's three rows (as the in-game menu). Upscale method: Off or an upscaler
 # (supersampling removed, user 2026-11-10); Upscale quality: the render size; Anti-aliasing: free
 # to choose only with method Off (an upscaler is its own). Stored as before: tlg.ini preset (0 off,
 # 1-4 upscaling) and upscaler (the upscaler, or the anti-aliasing).
-METHODS = [('preset_native', None), ('up_off', 'off'), ('up_dlss', 'dlss'), ('up_fsr3', 'fsr3'), ('up_fsr4', 'fsr4')]
+METHODS = [('preset_native', None), ('up_off', 'off'), ('up_dlss', 'dlss'), ('up_fsr3', 'fsr3'), ('up_fsr4', 'fsr4'),
+           ('up_xess', 'xess')]
 METHOD_OFF = 0
-AA_CHOICES = [('aa_game', 'off'), ('aa_dlaa', 'dlss'), ('up_fsr3', 'fsr3'), ('up_fsr4', 'fsr4'), ('up_taa', 'taa')]
+# Off: no anti-aliasing at all ('none': tlg.ini upscaler off + game_smaa=0, the game's SMAA cleared
+# too, user 2026-11-22); Game's own: upscaler off, the game's SMAA only.
+AA_CHOICES = [('aa_off', 'none'), ('aa_game', 'off'), ('aa_dlaa', 'dlss'), ('up_fsr3', 'fsr3'), ('up_fsr4', 'fsr4'), ('up_taa', 'taa'),
+              ('aa_xess', 'xess')]
 
 
 def fg_mode_of(ini):
@@ -624,6 +723,11 @@ def fsr4_unsupported(ini):
     return ini.get('fsr4_supported') == '0'
 
 
+def xess_unsupported(ini):
+    # The game writes its XeSS check (xess_supported); XeSS is Windows only (libxess.dll).
+    return sys.platform != 'win32' or ini.get('xess_supported') == '0'
+
+
 def upscaler_of(ini):
     # The UPSCALERS index tlg.ini picks (TlgSettings::Load: a file from before the row, and every
     # other upscaler, loads as DLSS; anti-aliasing off loads as Built-in).
@@ -631,12 +735,21 @@ def upscaler_of(ini):
         return 1
     if ini.get('dlaa', '1') in ('0', ''):
         return 0
-    return {'off': 0, 'fsr3': 2, 'fsr4': 3, 'taa': 4}.get(ini.get('upscaler'), 1)
+    return {'off': 0, 'fsr3': 2, 'fsr4': 3, 'taa': 4, 'xess': 5}.get(ini.get('upscaler'), 1)
+
+
+def aa_value_of(ini):
+    """The upscaler value the video rows show: UPSCALERS' value, or 'none' for the AA row's Off
+    (upscaler off at native size with game_smaa=0)."""
+    upscaler = UPSCALERS[upscaler_of(ini)][1]
+    if upscaler == 'off' and ini.get('game_smaa') == '0' and tlg_run.quality_preset(ini) <= 0:
+        return 'none'
+    return upscaler
 
 
 def method_of(preset, upscaler):
     """The METHODS index of a tlg.ini preset and upscaler (TAA runs at native size only)."""
-    if preset <= 0 or upscaler == 'taa':
+    if preset <= 0 or upscaler in ('taa', 'none'):
         return METHOD_OFF
     return [value for _, value in METHODS].index(upscaler)
 
@@ -1009,6 +1122,7 @@ def scroll_area(parent, padding=12):
     inner.bind('<Configure>', fit, add='+')
     canvas.bind('<Configure>', fit, add='+')
     canvas.scroll_inner = inner   # marks it for the wheel handler
+    canvas.refit = fit            # for content that got shorter (no event tells the canvas)
     return inner
 
 
@@ -1136,6 +1250,277 @@ def home_background(source, size, faded=False):
     mask = ImageChops.add(left.resize(size), bottom.resize(size))
     img = Image.composite(Image.new('RGB', size, dark), img, mask)
     return ImageTk.PhotoImage(img)
+
+
+class TexpackBuildWindow:
+    """Builds a texture pack from the player's own game copy (experimental, texpack_build): FULL only for
+    now, every texture upscaled. The kit and the model are fetched on first use; nothing is installed.
+    Closing the window stops the build; started again, it continues where it stopped."""
+
+    def __init__(self, app):
+        import texpack_build
+        self.tb = texpack_build
+        self.app = app
+        self.process = None
+        self.running = False
+        self.stop_event = threading.Event()
+        self.events = queue.Queue()
+        self.detected = None
+        t = app.t
+
+        top = self.top = tk.Toplevel(app.root)
+        top.title(t('texbuild_title'))
+        top.configure(background=BG)
+        top.transient(app.root)
+        top.protocol('WM_DELETE_WINDOW', self.close)
+        win = ttk.Frame(top, padding=14)
+        win.pack(fill='both', expand=True)
+        win.columnconfigure(1, weight=1)
+
+        ttk.Label(win, text=t('texbuild_experimental'), foreground=WARN, wraplength=560,
+                  justify='left').grid(row=0, column=0, columnspan=2, sticky='w')
+        ttk.Label(win, text=t('texbuild_text'), wraplength=560, justify='left').grid(
+            row=1, column=0, columnspan=2, sticky='w', pady=(6, 0))
+        # FULL is the only kind now; Light (only what the game draws larger than it is) comes later and
+        # will be the advised one.
+        kind = ttk.Frame(win)
+        kind.grid(row=2, column=0, columnspan=2, sticky='w', pady=(10, 0))
+        self.kind = tk.StringVar(value='full')
+        ttk.Radiobutton(kind, text=t('texbuild_full'), variable=self.kind, value='full').pack(side='left')
+        ttk.Radiobutton(kind, text=t('texbuild_light'), variable=self.kind, value='light',
+                        state='disabled').pack(side='left', padx=(16, 0))
+
+        ttk.Label(win, text=t('texbuild_gpu')).grid(row=3, column=0, sticky='w', pady=(10, 0))
+        amd = 'texbuild_gpu_amd_windows' if texpack_build.SYSTEM == 'windows' else 'texbuild_gpu_amd_linux'
+        self.gpus = [('nvidia', t('texbuild_gpu_nvidia')), ('amd', t(amd)), ('cpu', t('texbuild_gpu_cpu'))]
+        self.gpu = tk.StringVar(value=self.gpus[2][1])
+        self.gpu_box = ttk.Combobox(win, textvariable=self.gpu, state='readonly', width=40,
+                                    values=[name for _k, name in self.gpus])
+        self.gpu_box.grid(row=3, column=1, sticky='w', padx=6, pady=(10, 0))
+        self.gpu_note = ttk.Label(win, text=t('texbuild_detecting'), foreground=MUTED, wraplength=560,
+                                  justify='left')
+        self.gpu_note.grid(row=4, column=0, columnspan=2, sticky='w')
+
+        ttk.Label(win, text=t('texbuild_name')).grid(row=5, column=0, sticky='w', pady=(6, 0))
+        self.name = tk.StringVar(value='Full 4x')
+        ttk.Entry(win, textvariable=self.name, width=30).grid(row=5, column=1, sticky='w', padx=6, pady=(6, 0))
+
+        ttk.Label(win, text=t('texbuild_warnings', peak=texpack_build.FULL_PEAK_GB,
+                              pack=texpack_build.FULL_PACK_GB),
+                  wraplength=560, justify='left').grid(row=6, column=0, columnspan=2, sticky='w', pady=(10, 0))
+        self.space = ttk.Label(win, text='', foreground=MUTED)
+        self.space.grid(row=7, column=0, columnspan=2, sticky='w', pady=(4, 0))
+
+        self.progress = ttk.Progressbar(win, mode='determinate', length=560, maximum=1000)
+        self.progress.grid(row=8, column=0, columnspan=2, sticky='ew', pady=(10, 0))
+        self.status = ttk.Label(win, text='', wraplength=560, justify='left')
+        self.status.grid(row=9, column=0, columnspan=2, sticky='w', pady=(4, 0))
+        buttons = ttk.Frame(win)
+        buttons.grid(row=10, column=0, columnspan=2, sticky='w', pady=(10, 0))
+        self.start_button = ttk.Button(buttons, text=t('texbuild_start'), command=self.start)
+        self.start_button.pack(side='left')
+        self.stop_button = ttk.Button(buttons, text=t('texbuild_stop'), command=self.stop, state='disabled')
+        self.stop_button.pack(side='left', padx=(6, 0))
+        ttk.Button(buttons, text=t('texbuild_open_log'), command=self.open_log).pack(side='left', padx=(6, 0))
+        ttk.Button(buttons, text=t('close'), command=self.close).pack(side='left', padx=(6, 0))
+
+        self.show_space()
+        threading.Thread(target=self.detect, daemon=True).start()
+        top.after(200, self.pump)
+
+    # -- places ------------------------------------------------------------------------------
+    def kit_root(self):
+        return tlg_run.USER_DIR / 'texpack-kit'
+
+    def pack_root(self):
+        return tlg_run.texpack_dir(self.app.settings)
+
+    def pack_dir(self):
+        return self.pack_root() / self.name.get().strip()
+
+    def log_path(self):
+        return self.pack_root() / (self.name.get().strip() + '.build.log')
+
+    def chosen_gpu(self):
+        names = [name for _k, name in self.gpus]
+        value = self.gpu.get()
+        return self.gpus[names.index(value)][0] if value in names else 'cpu'
+
+    def alive(self):
+        try:
+            return bool(self.top.winfo_exists())
+        except tk.TclError:
+            return False
+
+    def show_space(self):
+        root = self.pack_root()
+        self.space.configure(text=self.app.t('texbuild_free', free=int(self.tb.free_gb(root)), folder=root))
+
+    # -- worker thread -> window -------------------------------------------------------------
+    def detect(self):
+        self.events.put(('detected', self.tb.detect_gpu()))
+
+    def say(self, key, fraction=None, **fmt):
+        self.events.put(('status', key, fraction, fmt))
+
+    def pump(self):
+        if not self.alive():
+            return
+        while True:
+            try:
+                event = self.events.get_nowait()
+            except queue.Empty:
+                break
+            if event[0] == 'detected':
+                self.detected = event[1]
+                kit = self.tb.default_kit_gpu(self.detected)
+                self.gpu.set(dict(self.gpus)[kit])
+                note = {'nvidia': 'texbuild_found_nvidia', 'nvidia-old': 'texbuild_found_nvidia_old',
+                        'amd': 'texbuild_found_amd'}.get(self.detected, 'texbuild_found_none')
+                self.gpu_note.configure(text=self.app.t(note))
+            elif event[0] == 'status':
+                _, key, fraction, fmt = event
+                self.status.configure(text=self.app.t(key, **fmt),
+                                      foreground=WARN if key in ('texbuild_failed', 'texbuild_error') else TEXT_COLOR)
+                if fraction is None:
+                    self.progress.configure(mode='indeterminate')
+                    self.progress.start(15)
+                else:
+                    self.progress.stop()
+                    self.progress.configure(mode='determinate', value=int(fraction * 1000))
+            elif event[0] == 'finished':
+                self.running = False
+                self.process = None
+                self.start_button.configure(state='normal')
+                self.stop_button.configure(state='disabled')
+                self.gpu_box.configure(state='readonly')
+                self.show_space()
+                if event[1]:
+                    self.app.texture_pack_built(event[1])
+        self.top.after(200, self.pump)
+
+    # -- start / stop ------------------------------------------------------------------------
+    def problem(self):
+        """Why the build cannot start (a text key and its values), or None."""
+        game = self.app.settings.get('game_dir', '')
+        if not game or not Path(game).exists():
+            return 'texbuild_no_game', {}
+        if game_image.is_zar(game):
+            return 'texbuild_zar', {}
+        name = self.name.get().strip()
+        if not re.fullmatch(r'[\w][\w \-.]{0,59}', name) or name.endswith('.work'):
+            return 'texbuild_bad_name', {}
+        if (self.pack_dir() / 'index.txt').is_file() and \
+                not (self.pack_dir().with_name(name + '.work') / 'png').is_dir():
+            return 'texbuild_exists', {'name': name}
+        return None
+
+    def start(self):
+        bad = self.problem()
+        if bad:
+            messagebox.showwarning(self.app.t('texbuild_title'), self.app.t(bad[0], **bad[1]), parent=self.top)
+            return
+        if self.chosen_gpu() == 'nvidia' and self.detected == 'nvidia-old':
+            if not messagebox.askyesno(self.app.t('texbuild_title'), self.app.t('texbuild_found_nvidia_old'),
+                                       parent=self.top, icon='warning'):
+                return
+        self.running = True
+        self.stop_event.clear()
+        self.start_button.configure(state='disabled')
+        self.stop_button.configure(state='normal')
+        self.gpu_box.configure(state='disabled')
+        gpu, game, pack, log = self.chosen_gpu(), self.app.settings['game_dir'], self.pack_dir(), self.log_path()
+        threading.Thread(target=self.work, args=(gpu, game, pack, log), daemon=True).start()
+
+    def ask(self, key, **fmt):
+        """A yes/no question from the worker thread (asked on the window's thread)."""
+        answer, done = [], threading.Event()
+        if not self.alive():
+            return False
+
+        def show():
+            answer.append(messagebox.askyesno(self.app.t('texbuild_title'), self.app.t(key, **fmt),
+                                              parent=self.top, icon='warning'))
+            done.set()
+        self.top.after(0, show)
+        done.wait()
+        return answer[0]
+
+    def work(self, gpu, game, pack, log):
+        tb, root, built = self.tb, self.kit_root(), None
+        try:
+            self.say('texbuild_fetching')
+            manifest = tb.fetch_manifest(gpu)
+            kit = tb.installed_kit(root, gpu)
+            ready = kit is not None and kit.get('version') == manifest.get('version')
+            kit_gb, pack_gb = tb.needed_gb(manifest, ready)
+            free_kit, free_pack = tb.free_gb(root), tb.free_gb(pack.parent)
+            same_drive = Path(root).resolve().anchor.lower() == Path(pack.parent).resolve().anchor.lower()
+            if same_drive and free_pack < kit_gb + pack_gb or free_pack < pack_gb or free_kit < kit_gb:
+                need, free, where = (kit_gb + pack_gb, free_pack, pack.parent) if same_drive or free_pack < pack_gb \
+                    else (kit_gb, free_kit, root)
+                if not self.ask('texbuild_low_space', need=int(need + 0.999), free=int(free), folder=where):
+                    self.say('texbuild_stopped', 0)
+                    return
+            if not self.ask('texbuild_confirm', kit=f'{kit_gb:.1f}', peak=tb.FULL_PEAK_GB, folder=pack.parent):
+                self.say('texbuild_ready', 0)
+                return
+
+            def progress(label, fraction):
+                if fraction is None:
+                    self.say('texbuild_unpacking')
+                else:
+                    self.say('texbuild_downloading', fraction, what=label, percent=int(fraction * 100))
+            if not ready:
+                kit = tb.install_kit(root, gpu, manifest, progress, self.stop_event.is_set)
+            tb.install_model(root, gpu, kit, progress, self.stop_event.is_set)
+            if self.stop_event.is_set():
+                raise InterruptedError
+            pack.parent.mkdir(parents=True, exist_ok=True)
+            self.process = tb.start_build(tb.build_command(root, gpu, kit, game, pack), log)
+            # Quitting the launcher ends the build too (its workers run in their own process group).
+            atexit.register(tb.stop_build, self.process)
+            while self.process.poll() is None:
+                phase, done, total = tb.build_progress(pack)
+                if phase == 'scan':
+                    self.say('texbuild_scanning')
+                else:
+                    self.say(f'texbuild_{phase}', done / total if total else 0, done=done, total=total)
+                self.stop_event.wait(3)
+            if self.stop_event.is_set():
+                raise InterruptedError
+            if self.process.returncode == 0 and (pack / 'index.txt').is_file():
+                built = pack.name
+                self.say('texbuild_done', 1, name=pack.name)
+            else:
+                self.say('texbuild_failed', 0, log=log)
+        except InterruptedError:
+            self.say('texbuild_stopped', 0)
+        except Exception as error:  # network, disk, a damaged download: shown, the build can start again
+            self.say('texbuild_error', 0, error=error)
+        finally:
+            self.events.put(('finished', built))
+
+    def stop(self):
+        self.stop_event.set()
+        if self.process is not None:
+            self.tb.stop_build(self.process)
+        self.stop_button.configure(state='disabled')
+
+    def close(self):
+        if self.running:
+            if not messagebox.askyesno(self.app.t('texbuild_title'), self.app.t('texbuild_close_running'),
+                                       parent=self.top):
+                return
+            self.stop()
+        self.top.destroy()
+
+    def open_log(self):
+        path = self.log_path()
+        if path.is_file():
+            tlg_run.open_external(path)
+        else:
+            tlg_run.open_external(self.pack_root() if self.pack_root().is_dir() else tlg_run.USER_DIR)
 
 
 class Page(ttk.Frame):
@@ -1339,14 +1724,23 @@ class Launcher:
             self.fg_note.grid_remove()
         self.apply_renderer()
 
+    def update_fps_note(self):
+        """The red warning under Frame rate while Unlocked is picked."""
+        if self.settings.get('frame_rate') == 'unlocked':
+            self.fps_note.grid()
+        else:
+            self.fps_note.grid_remove()
+
     def update_aa_note(self, ini):
         # DLSS or FSR 4 stays the choice in tlg.ini; the game runs FSR 3.1 while the card lacks it.
         mode = self.video_state[1]
         if tlg_run.backend_on(self.settings):  # the default renderer's DLSS / FSR 4 checks say nothing about the backend
             self.aa_note.grid_remove()
             return
-        if (mode == 'dlss' and dlss_unsupported(ini)) or (mode == 'fsr4' and fsr4_unsupported(ini)):
-            self.aa_note.configure(text=self.t('aa_no_dlss' if mode == 'dlss' else 'aa_no_fsr4'))
+        notes = {'dlss': (dlss_unsupported, 'aa_no_dlss'), 'fsr4': (fsr4_unsupported, 'aa_no_fsr4'),
+                 'xess': (xess_unsupported, 'aa_no_xess')}
+        if mode in notes and notes[mode][0](ini):
+            self.aa_note.configure(text=self.t(notes[mode][1]))
             self.aa_note.grid()
         else:
             self.aa_note.grid_remove()
@@ -1491,12 +1885,46 @@ class Launcher:
         self.vars['update_check'] = update_var
         ttk.Checkbutton(launcher, text=self.t('update_check'), variable=update_var,
                         command=self.changed).pack(side='left', padx=(12, 0))
+        self.build_trophy_key(right)
         debug = section(right, self.t('debug'))
         debug.grid(sticky='ew')
         self.check(debug, 0, 'level_select')
         self.hint(debug, 0, 3, 'debug_hint')
         self.check(debug, 2, 'debug_logging')
         self.hint(debug, 2, 3, 'debug_logging_hint')
+
+    def build_trophy_key(self, parent):
+        """The PS4 trophy key (tlg.ini trophy_key, issue #60; also in the in-game menu's Trophies tab).
+        Kept in tlg.ini only, like the sound device, so a key entered in the game stays."""
+        ini_path = tlg_run.USER_DIR / 'tlg.ini'
+        box = section(parent, self.t('trophies_section'))
+        box.grid(sticky='ew', pady=(0, 8))
+        ttk.Label(box, text=self.t('trophy_key')).grid(row=0, column=0, sticky='w')
+        key = tk.StringVar(value=tlg_run.read_ini(ini_path).get('trophy_key', ''))
+        ttk.Entry(box, textvariable=key, show='*', width=36).grid(row=1, column=0, sticky='w', pady=2)
+
+        status = tk.StringVar()
+
+        def save():
+            # Checked against the game's own trophy file first; a key that does not open it is not kept.
+            npbind = art_path(self.settings, 'npbind.dat')
+            result, names = trophy_key.check(npbind.parent if npbind else '', key.get())
+            status.set(self.t('trophy_key_' + result, names=names))
+            if result in ('format', 'wrong'):
+                return
+            tlg_run.USER_DIR.mkdir(parents=True, exist_ok=True)
+            tlg_run.update_ini(ini_path, {'trophy_key': ''.join(key.get().split())})
+
+        ttk.Button(box, text=self.t('trophy_key_save'), command=save).grid(row=1, column=1, sticky='w', padx=(6, 0))
+        self.hint(box, 1, 2, 'trophy_key_hint')
+        ttk.Label(box, textvariable=status, wraplength=420).grid(row=2, column=0, columnspan=3, sticky='w')
+        # Pop-up and chime on an unlock (tlg.ini trophy_popup; live, also in the Trophies tab).
+        popup = tk.BooleanVar(value=tlg_run.read_ini(ini_path).get('trophy_popup', '0') != '0')
+        ttk.Checkbutton(box, text=self.t('trophy_popup'), variable=popup,
+                        command=lambda: tlg_run.update_ini(ini_path, {'trophy_popup': int(popup.get())})
+                        ).grid(row=3, column=0, columnspan=3, sticky='w', pady=(4, 0))
+        ttk.Label(box, text=self.t('trophy_popup_note'), foreground='#e0605a', wraplength=420
+                  ).grid(row=4, column=0, columnspan=3, sticky='w')
 
     def build_sound_output(self, parent):
         """Output device and 'Always send 7.1' (tlg.ini audio_device / audio_surround, also in the
@@ -1526,12 +1954,22 @@ class Launcher:
             row=4, column=0, sticky='w')
 
     def build_drool(self, parent):
-        """Built-in mods on the Mods page: Trico's drool, with its story in plain sight: the developers built it
+        """Built-in mods on the Extras page: Trico's drool, with its story in plain sight: the developers built it
         and switched it off just before release (tlg.ini trico_drool; the game reads it live, also from
-        the in-game Fun tab)."""
+        the in-game Extras tab)."""
         drool = next(item for item in backports_table.MENU if item.key == 'trico_drool')
-        box = section(parent, drool.name)
-        box.pack(fill='x', anchor='w', pady=(0, 8))
+        # Two columns of equal width (#103); the texts wrap to the column (see rewrap below).
+        grid = ttk.Frame(parent)
+        grid.pack(fill='x', anchor='w')
+        grid.columnconfigure((0, 1), weight=1, uniform='cols')
+        texts = []
+
+        def place(box, index):
+            box.grid(row=index // 2, column=index % 2, sticky='nsew', pady=(0, 8),
+                     padx=(0, 8) if index % 2 == 0 else (8, 0))
+
+        box = section(grid, drool.name)
+        place(box, 0)
         values = [choice[0] for choice in drool.choices]
         combo = ttk.Combobox(box, values=[choice[1] for choice in drool.choices], state='readonly', width=28)
         chosen = tlg_run.read_ini(tlg_run.USER_DIR / 'tlg.ini').get('trico_drool', drool.default)
@@ -1544,13 +1982,15 @@ class Launcher:
             self.ini_stamp = self.ini_files_stamp()  # our own write: nothing to reload
 
         combo.bind('<<ComboboxSelected>>', lambda _: picked())
-        ttk.Label(box, text=drool.what, foreground=DIM, wraplength=420, justify='left').grid(
-            row=1, column=0, sticky='w', pady=(6, 0))
+        texts.append(ttk.Label(box, text=drool.what, foreground=DIM, wraplength=420, justify='left'))
+        texts[-1].grid(row=1, column=0, columnspan=2, sticky='w', pady=(6, 0))
         ini = tlg_run.read_ini(tlg_run.USER_DIR / 'tlg.ini')
-        for key in ('trico_fur', 'mod_treasures', 'mod_horns', 'mod_plays', 'mod_throw_up', 'mod_hints'):
+        for index, key in enumerate(('trico_fur', 'trico_helmet', 'mod_treasures', 'mod_horns', 'mod_foxtail', 'mod_plays',
+                    'mod_throw_up', 'mod_hints', 'leaf_ao'), start=1):
             item = next(i for i in backports_table.MENU if i.key == key)
-            mod = section(parent, item.name)
-            mod.pack(fill='x', anchor='w', pady=(0, 8))
+            mod = section(grid, item.name)
+            mod.columnconfigure(1, weight=1)   # spare width goes right of the control
+            place(mod, index)
             def write(value, k=key):
                 tlg_run.USER_DIR.mkdir(parents=True, exist_ok=True)
                 tlg_run.update_ini(tlg_run.USER_DIR / 'tlg.ini', {k: value})
@@ -1586,14 +2026,24 @@ class Launcher:
 
                 def ticked(v=var, w=write, k=key, n=note):
                     w('1' if v.get() else '0')
-                    if k == 'mod_horns' and v.get():   # built only for players who want them (user 2026-11-11)
-                        error = tlg_run.build_ico_horns(tlg_run.USER_DIR)
-                        n.configure(text=self.t('horns_failed', error=error) if error else self.t('horns_built'))
+                    if k in tlg_run.MOD_MODEL_KEYS and v.get():   # built only for players who want them (user 2026-11-11)
+                        error = tlg_run.build_mod_models(tlg_run.USER_DIR)
+                        what = 'horns' if k == 'mod_horns' else 'foxtail'
+                        n.configure(text=self.t(f'{what}_failed', error=error) if error else self.t(f'{what}_built'))
                         n.grid(row=2, column=0, sticky='w', pady=(4, 0))
 
                 ttk.Checkbutton(mod, text=item.name, variable=var, command=ticked).grid(row=0, column=0, sticky='w')
-            ttk.Label(mod, text=item.what, foreground=DIM, wraplength=900, justify='left').grid(
-                row=1, column=0, sticky='w', pady=(6, 0))
+            texts.append(ttk.Label(mod, text=item.what, foreground=DIM, wraplength=420, justify='left'))
+            texts[-1].grid(row=1, column=0, columnspan=2, sticky='w', pady=(6, 0))
+
+        # Wrap to the column, measured from the visible area (not from the boxes: those never
+        # shrink below their own text). Below the floor the page scrolls sideways instead.
+        def rewrap(event):
+            width = max(260, (event.width - 24 - 16) // 2 - 36)
+            for label in texts:
+                label.configure(wraplength=width)
+            parent.master.after(60, parent.master.refit)   # once the new heights have settled
+        parent.master.bind('<Configure>', rewrap, add='+')
 
     def build_gpu_choice(self, parent, row):
         """Video > Graphics card: Automatic or one of the cards Vulkan lists (tlg_run.gpu_list, the
@@ -1636,8 +2086,12 @@ class Launcher:
         self.renderer_note = ttk.Label(video, text=self.t('renderer_note'), foreground=MUTED, wraplength=320)
         self.renderer_note.grid(row=6, column=0, columnspan=2, sticky='w')
         self.combo(video, 5, 'frame_rate', tlg_run.FRAME_RATES, lambda k: self.t(f'fps_{k}'),
-                   on_change=lambda: (self.update_fg(), self.refresh_status()))
+                   on_change=lambda: (self.update_fg(), self.update_fps_note(), self.refresh_status()))
         self.hint(video, 5, 2, 'fps_hint')
+        # Unlocked breaks some scenes (the boy misses Trico's tail in s06 at ~116 FPS, fine at 120; 11-23).
+        self.fps_note = ttk.Label(video, text=self.t('fps_unlocked_warning'), foreground='#e0605a', wraplength=320)
+        self.fps_note.grid(row=6, column=0, columnspan=3, sticky='w')
+        self.update_fps_note()
         self.combo(video, 7, 'resolution', tlg_run.RESOLUTIONS, tlg_run.resolution_label)
         self.hint(video, 7, 2, 'resolution_hint')
         ini = tlg_run.read_ini(tlg_run.USER_DIR / 'tlg.ini')
@@ -1661,7 +2115,7 @@ class Launcher:
         self.hint(video, 11, 2, 'aa_hint')
         self.aa_note = ttk.Label(video, text=self.t('aa_no_dlss'), foreground=MUTED, wraplength=320)
         self.aa_note.grid(row=12, column=0, columnspan=2, sticky='w')
-        self.show_video_rows(tlg_run.quality_preset(ini), UPSCALERS[upscaler_of(ini)][1])
+        self.show_video_rows(tlg_run.quality_preset(ini), aa_value_of(ini))
         self.update_aa_note(ini)
         ttk.Label(video, text=self.t('fg_mode')).grid(row=14, column=0, sticky='w', pady=(6, 0))
         self.fg_box = ttk.Combobox(video, state='readonly', width=20)
@@ -1807,6 +2261,8 @@ class Launcher:
             side='right', pady=(6, 0))
         ttk.Button(header, text=self.t('report_issue'), command=self.report_issue).pack(
             side='right', padx=(0, 6), pady=(6, 0))
+        ttk.Button(header, text=self.t('disc_check'), command=self.check_disc).pack(
+            side='right', padx=(0, 6), pady=(6, 0))
         # The same Advanced logging switch as Settings > Debug; shown on Debug > Flags.
         self.debug_logging_var = tk.BooleanVar(value=bool(self.settings.get('debug_logging')))
 
@@ -1848,6 +2304,7 @@ class Launcher:
         the music tool plays it). The list is read when the page first opens."""
         win = self.soundtrack_window = Page(self, 'soundtrack')
         win.title(self.t('home_soundtrack'), self.t('soundtrack_hint'))
+        win = scroll_area(win, padding=0)   # the page scrolls when the window is too small (#103)
         bar = ttk.Frame(win, padding=(12, 8, 12, 0))
         bar.pack(fill='x')
         self.track_button = ttk.Button(bar, text=self.t('soundtrack_play'), command=self.track_play_pause)
@@ -2407,6 +2864,8 @@ class Launcher:
         self.pack_box.grid(row=row + 4, column=1, sticky='w', padx=6, pady=(6, 2))
         self.pack_box.bind('<<ComboboxSelected>>', lambda _: self.texture_pack_picked())
         self.hint(parent, row + 4, 2, 'texture_pack_hint')
+        ttk.Button(parent, text=self.t('texbuild_button'), command=self.open_texbuild).grid(
+            row=row + 5, column=1, sticky='w', padx=6, pady=(0, 2))
         self.theirs(self.preset_box, self.pack_box, *save.winfo_children())
         self.refresh_preset()
         self.refresh_texture_pack()
@@ -2431,7 +2890,7 @@ class Launcher:
     def reload_ini(self):
         """The rows that show tlg.ini values read it again."""
         ini = tlg_run.read_ini(tlg_run.USER_DIR / 'tlg.ini')
-        self.show_video_rows(tlg_run.quality_preset(ini), UPSCALERS[upscaler_of(ini)][1])
+        self.show_video_rows(tlg_run.quality_preset(ini), aa_value_of(ini))
         self.update_fg(ini)
         self.update_aa_note(ini)
         self.hdr_var.set(ini.get('hdr', '1') != '0')
@@ -2459,6 +2918,23 @@ class Launcher:
         if current.isdigit():  # older tlg.ini: a 1-based index
             current = self.texture_packs[int(current) - 1] if 0 < int(current) <= len(self.texture_packs) else 'off'
         self.pack_box.set(current if current in self.texture_packs else self.t('texture_pack_off'))
+
+    def open_texbuild(self):
+        """The texture pack build window (experimental); one at a time."""
+        old = getattr(self, 'texbuild_win', None)
+        if old is not None and old.alive():
+            old.top.lift()
+            return
+        self.texbuild_win = TexpackBuildWindow(self)
+
+    def texture_pack_built(self, name):
+        """A finished build: picked in tlg.ini and shown in the pack row."""
+        tlg_run.USER_DIR.mkdir(parents=True, exist_ok=True)
+        tlg_run.update_ini(tlg_run.USER_DIR / 'tlg.ini', {'texture_pack': name})
+        self.ini_stamp = self.ini_files_stamp()
+        if getattr(self, 'pack_box', None) is not None and self.pack_box.winfo_exists():
+            self.refresh_texture_pack()
+            self.refresh_preset()
 
     def texture_pack_picked(self):
         index = self.pack_box.current()
@@ -2488,7 +2964,7 @@ class Launcher:
         if index < 0:
             return
         tlg_run.USER_DIR.mkdir(parents=True, exist_ok=True)
-        tlg_run.update_ini(tlg_run.USER_DIR / 'tlg.ini', self.presets[index][1])
+        tlg_run.update_ini(tlg_run.USER_DIR / 'tlg.ini', {**self.presets[index][1], 'game_smaa': 1})  # as the in-game menu (SetUpscaler)
         self.ini_stamp = self.ini_files_stamp()  # our own write: nothing to reload
         if index == preset_share.DECK_INDEX:  # the Steam Deck entry: its resolution and frame rate too
             self.settings.update(preset_share.DECK_SETTINGS)
@@ -2516,11 +2992,20 @@ class Launcher:
         else:
             preset, upscaler = video_choice(self.video_state, self.method_box.current(), self.quality_box.current(),
                                             self.aa_box.current())
+        # XeSS is Windows only: off Windows the pick is refused (the in-game menu greys it out;
+        # a Tk list cannot grey one entry), the rows go back and the note says why.
+        refused = upscaler == 'xess' and sys.platform != 'win32'
+        if refused:
+            preset, upscaler = self.video_state
         self.show_video_rows(preset, upscaler)
         self.update_aa_note(current_ini)
+        if refused:
+            self.aa_note.configure(text=self.t('aa_no_xess'))
+            self.aa_note.grid()
         self.update_strength(current_ini)
         # tlg.ini dlaa: anti-aliasing or upscaling by something else than the game's own.
-        values.update(upscaler=upscaler, aa_row=1, preset=preset, dlaa=int(upscaler != 'off'))
+        values.update(upscaler='off' if upscaler == 'none' else upscaler, aa_row=1, preset=preset,
+                      dlaa=int(upscaler not in ('off', 'none')), game_smaa=int(upscaler != 'none'))
         for key, (low, high) in COLOR_RANGES.items():
             try:
                 value = min(max(float(self.ini_vars[key].get().replace(',', '.')), low), high)
@@ -2680,24 +3165,16 @@ class Launcher:
             return
         win = self.mods_window = Page(self, 'mods')
         win.title(self.t('mods_title'), self.t('mods_hint'))
-        frame = ttk.Frame(win, padding=12)
-        frame.pack(fill='both', expand=True)
+        # The whole page scrolls (#103): the built-in extras alone are taller than a small window,
+        # so the cheat list no longer scrolls on its own in whatever height was left over.
+        frame = scroll_area(win)
         self.show_page('mods')
         self.build_drool(frame)  # built-in mods (tlg.ini, live in game) above the cheat files
         ttk.Label(frame, text=self.t('mods_warning'), foreground='#d07060', wraplength=900, justify='left').pack(
             anchor='w', pady=(4, 8))
 
-        list_frame = ttk.Frame(frame)
-        list_frame.pack(fill='both', expand=True)
-        canvas = tk.Canvas(list_frame, highlightthickness=0, background=BG, yscrollincrement=24)
-        scroll = ttk.Scrollbar(list_frame, orient='vertical', command=canvas.yview)
-        rows = ttk.Frame(canvas)
-        canvas.scroll_inner = rows
-        rows.bind('<Configure>', lambda _: canvas.configure(scrollregion=canvas.bbox('all')))
-        canvas.create_window((0, 0), window=rows, anchor='nw')
-        canvas.configure(yscrollcommand=scroll.set)
-        canvas.pack(side='left', fill='both', expand=True)
-        scroll.pack(side='right', fill='y')
+        rows = ttk.Frame(frame)
+        rows.pack(fill='x', anchor='w')
 
         def toggle(key, var):
             tlg_run.set_mod_enabled(key, var.get())
@@ -2978,6 +3455,21 @@ class Launcher:
         slow_box.bind('<<ComboboxSelected>>', lambda _: slow_picked())
         help_mark(parent, slow.what).grid(row=row, column=2, sticky='w', padx=(4, 0), pady=3)
         resets.append(lambda: (slow_box.current(slow_values.index(slow.default)), slow_picked()))
+        # Build shaders ahead (tlg.ini shader_prebuild, read at start), next to Clear shader cache below.
+        prebuild = next(item for item in backports_table.MENU if item.key == 'shader_prebuild')
+        parent, row = place(0)
+        prebuild_var = tk.BooleanVar(
+            value=tlg_run.read_ini(tlg_run.USER_DIR / 'tlg.ini').get('shader_prebuild', prebuild.default) != '0')
+
+        def prebuild_toggled():
+            tlg_run.USER_DIR.mkdir(parents=True, exist_ok=True)
+            tlg_run.update_ini(tlg_run.USER_DIR / 'tlg.ini', {'shader_prebuild': '1' if prebuild_var.get() else '0'})
+            self.ini_stamp = self.ini_files_stamp()  # our own write: nothing to reload
+
+        prebuild_box = ttk.Checkbutton(parent, text=prebuild.name, variable=prebuild_var, command=prebuild_toggled)
+        prebuild_box.grid(row=row, column=0, columnspan=2, sticky='w')
+        help_mark(parent, prebuild.what, prebuild_box).grid(row=row, column=2, sticky='w', padx=(4, 0), pady=3)
+        resets.append(lambda: (prebuild_var.set(prebuild.default == '1'), prebuild_toggled()))
         # The memory test switches moved to Debug > Flags (2026-11-12).
         bottom = ttk.Frame(frame)
         bottom.grid(row=2, column=0, columnspan=2, sticky='ew', pady=(10, 0))
@@ -3018,6 +3510,7 @@ class Launcher:
             text = '; '.join(self.t('not_built') if k == 'not_built'
                              else self.t('old_version', version=d) if k == 'old_version'
                              else self.t('fps_unsupported') if k == 'fps_unsupported'
+                             else self.t('untested_disc', serial=d) if k == 'untested_disc'
                              else f"{self.t('missing')}: {d}" for k, d in problems)
         else:
             text = self.t('ready')
@@ -3128,8 +3621,7 @@ class Launcher:
             return
         win = self.start_window = Page(self, 'start')
         win.title(self.t('start_title'), self.t('start_hint'))
-        frame = ttk.Frame(win, padding=(12, 12))
-        frame.pack(fill='x')
+        frame = scroll_area(win)
         stages = list(dict.fromkeys(stage for stage, _ in start_points.POINTS))
         ttk.Label(frame, text=self.t('start_stage')).grid(row=0, column=0, sticky='w', pady=4)
         stage_box = ttk.Combobox(frame, values=stages, state='readonly', width=32)
@@ -3288,14 +3780,77 @@ class Launcher:
             url = report.issue_url(title, full, short)[0]
             zip_name = 'report-' + time.strftime('%Y%m%d-%H%M%S') + '.zip'
             clean_log = report.redact(log_text, names)[0] if log_text else None
-            if not report.leftover_home_paths((clean_log or '') + full, names):   # never save a leak
+            try:   # is this disc the same game as the tested US/EU ones (#105); checksums only
+                import disc_check
+                disc_text = report.redact(disc_check.report(self.settings.get('game_dir', '')), names)[0] \
+                    if self.settings.get('game_dir') else None
+            except Exception:
+                disc_text = None
+            if not report.leftover_home_paths((clean_log or '') + full + (disc_text or ''), names):   # never save a leak
                 try:
-                    report.write_zip(tlg_run.LOG_DIR / zip_name, full, clean_log, log_name)
+                    report.write_zip(tlg_run.LOG_DIR / zip_name, full, clean_log, log_name, disc_text)
                 except OSError:
                     pass
             self.root.after(0, lambda: (self.open(tlg_run.LOG_DIR), tlg_run.open_external(url),
                                         self.status.configure(text=self.t('report_done', zip=zip_name))))
         threading.Thread(target=work, daemon=True).start()
+
+    def check_disc(self):
+        """Debug > Check game disc (disc_check.py, #105): checksums of the game files compared with
+        the tested US/EU discs, saved as a text file in the logs folder (opened) for the player to
+        send. No game content and no folder names in it."""
+        import threading
+        import disc_check
+        import report
+        game_dir = self.settings.get('game_dir', '')
+        if not game_dir:
+            messagebox.showwarning(TITLE, self.t('disc_check_no_game'))
+            return
+        self.status.configure(text=self.t('disc_check_busy'))
+
+        def work():
+            try:
+                text = report.redact(disc_check.report(game_dir), report.own_names())[0]
+                title = disc_check.disc(game_dir)[0] or 'unknown'
+                name = f'disc-check-{title}-' + time.strftime('%Y%m%d-%H%M%S') + '.txt'
+                tlg_run.LOG_DIR.mkdir(parents=True, exist_ok=True)
+                (tlg_run.LOG_DIR / name).write_text(text, encoding='utf-8')
+            except Exception as error:   # shown, never a silent failure
+                message = str(error)
+                self.root.after(0, lambda: (self.status.configure(text=''),
+                                            messagebox.showerror(self.t('error'), message)))
+                return
+            self.root.after(0, lambda: (self.status.configure(text=self.t('disc_check_done', file=name)),
+                                        self.show_disc_check(text, tlg_run.LOG_DIR / name)))
+        threading.Thread(target=work, daemon=True).start()
+
+    def show_disc_check(self, text, path):
+        """The disc check in a window: selectable text, Copy (clipboard) and Open file."""
+        win = tk.Toplevel(self.root)
+        win.title(self.t('disc_check'))
+        win.configure(background=BG)
+        win.transient(self.root)
+        body = tk.Text(win, wrap='none', font='TkFixedFont', width=96, height=30, background=FIELD,
+                       foreground=TEXT_COLOR, insertbackground=TEXT_COLOR, highlightthickness=0, relief='flat')
+        body.insert('1.0', text)
+        body.configure(state='disabled')   # read-only, still selectable
+        scroll = ttk.Scrollbar(win, command=body.yview)
+        body.configure(yscrollcommand=scroll.set)
+        buttons = ttk.Frame(win, padding=(12, 8))
+        buttons.pack(side='bottom', fill='x')
+        scroll.pack(side='right', fill='y', pady=(12, 0))
+        body.pack(fill='both', expand=True, padx=(12, 0), pady=(12, 0))
+        note = ttk.Label(buttons, text='')
+        note.pack(side='left')
+
+        def copy():
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            note.configure(text=self.t('disc_check_copied'))
+        ttk.Button(buttons, text=self.t('close'), command=win.destroy).pack(side='right')
+        ttk.Button(buttons, text=self.t('disc_check_open'), command=lambda: tlg_run.open_external(path)).pack(
+            side='right', padx=(0, 6))
+        ttk.Button(buttons, text=self.t('disc_check_copy'), command=copy).pack(side='right', padx=(0, 6))
 
     def copy_command(self):
         self.root.clipboard_clear()

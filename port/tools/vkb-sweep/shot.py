@@ -7,6 +7,7 @@ set every tick -> game speed 0.001 -> 4 s -> picture of the game window on the v
 SHOT_TRICO=show (environment) leaves out the "hide Trico" step only; the default is SHOT_TRICO=hide.
 SHOT_LEAVEOUT=camera,pose,speed,tick leaves out those photo steps (active camera, camera pose once, game speed, camera tick).
 SHOT_PLAY_S=N lets the game play N seconds after the load, before the photo steps (measurement runs; default 0).
+SHOT_PAD_PATTERN=FILE plays a timed pad pattern (pads/*.txt) during that time; the play time is at least the pattern's.
 
 Usage: shot.py OUT STAGE SCENE VKB TAKES [--cam "X Y Z PITCH YAW"] [NAME=VALUE ...]
   OUT   folder for the pictures and logs (outside the repo). Pictures: OUT/STAGE__SCENE/vkbV_takeN.png
@@ -32,6 +33,31 @@ USER = os.path.join(INSTALL, "user") if WIN else os.environ.get("TLG_USER_DIR", 
 DISPLAY = os.environ.get("SHOT_DISPLAY", ":93")
 TITLE_S, LOAD_S, WAIT_S, SETTLE_S = 400, 240, 8, 4
 PLAY_S = float(os.environ.get("SHOT_PLAY_S", "0"))
+PAD_PATTERN = os.environ.get("SHOT_PAD_PATTERN", "")
+
+
+def read_pattern(path):
+    """A pad pattern (pads/README.md): lines "SECONDS TOKENS..." in rising order; the tokens of a line (the game's
+    TLG_PAD_FILE tokens, none = let go) hold from that time to the next line; the last line ends the pattern."""
+    steps = []
+    with open(path) as f:
+        for n, line in enumerate(f, 1):
+            line = line.split("#", 1)[0].split()
+            if not line:
+                continue
+            try:
+                t = float(line[0])
+            except ValueError:
+                sys.exit(f"{path}:{n}: a line starts with its time in seconds")
+            if steps and t < steps[-1][0]:
+                sys.exit(f"{path}:{n}: times must rise")
+            steps.append((t, " ".join(line[1:])))
+    if not steps:
+        sys.exit(f"{path}: empty pad pattern")
+    return steps
+
+
+PATTERN = read_pattern(PAD_PATTERN) if PAD_PATTERN else []
 GB = 1 << 30
 JOURNAL = os.environ.get("SHOT_JOURNAL", "/home/runner/loop/journal.md")
 
@@ -460,7 +486,11 @@ def steps(game, send, out, tag, stage, scene, env, cam_file, cam_arg):
     if not game.wait(LOAD_S, loaded):
         return "no load" if game.ended() is None else "ended during load"
     game.wait(WAIT_S)
-    if PLAY_S > 0:
+    if PATTERN:
+        why = play_pattern(game, send, env["TLG_PAD_FILE"])
+        if why:
+            return why
+    if PLAY_S > 0 and not PATTERN:
         print(f"  playing {PLAY_S:.0f} s before the photo (SHOT_PLAY_S)", flush=True)
         game.wait(PLAY_S)
         if game.proc.poll() is not None:
@@ -504,6 +534,34 @@ def steps(game, send, out, tag, stage, scene, env, cam_file, cam_arg):
     return f"ok {size}, faults {faults}"
 
 
+def play_pattern(game, send, pad_file):
+    """SHOT_PAD_PATTERN: writes each step's tokens to the game's pad file at its time (the game reads the file when
+    it changes, every 20 ms). The game log gets "Lua: shot pad pattern start" first and "... end" after, so a
+    counter can be read from a fixed moment after the load; the game's own "Runtime: pad file:" lines show each
+    step it took. Then the rest of SHOT_PLAY_S, if that is longer."""
+    def put(tokens):
+        with open(pad_file + ".new", "w", newline="\n") as f:
+            f.write(tokens + "\n")
+        os.replace(pad_file + ".new", pad_file)
+    print(f"  pad pattern {os.path.basename(PAD_PATTERN)}: {len(PATTERN)} steps, {PATTERN[-1][0]:.0f} s", flush=True)
+    mark = len(game.lines())
+    send(HEAD + "L('shot pad pattern start')\n")
+    game.wait(5, lambda ls: any("Lua: shot pad pattern start" in l for l in ls[mark:]))
+    start = time.monotonic()
+    try:
+        for t, tokens in PATTERN:
+            if not game.wait(start + t - time.monotonic()) and game.ended() is not None:
+                return "ended while playing"
+            put(tokens)
+    finally:
+        put("")
+    mark = len(game.lines())
+    send(HEAD + "L('shot pad pattern end')\n")
+    game.wait(5, lambda ls: any("Lua: shot pad pattern end" in l for l in ls[mark:]))  # read before the next send
+    game.wait(max(0.0, PLAY_S - PATTERN[-1][0]))
+    return "ended while playing" if game.ended() is not None else None
+
+
 def counters(env, out, tag):
     """With TLG_DEBUG_SERVER_PORT set (NAME=VALUE), the game's counters at the moment of the picture are kept as
     TAG.stats.json and TAG.native.json (the debug server's /stats and /native). A failed read is said, not hidden."""
@@ -536,6 +594,10 @@ def main():
         sys.exit(f"SHOT_TRICO={TRICO}: use hide (the default) or show")
     env = dict(e.split("=", 1) for e in args[5:])
     env["TLG_VKB"] = vkb
+    if PATTERN:
+        if "TLG_PAD_FILE" in env:
+            sys.exit("SHOT_PAD_PATTERN writes the pad file itself: leave out TLG_PAD_FILE")
+        env["TLG_PAD_FILE"] = os.path.abspath(os.path.join(root, f"{stage}__{scene}", "pad.txt"))
     if "TLG_USER_DIR" in env:
         sys.exit("set TLG_USER_DIR in the shell, not as NAME=VALUE (the script backs up the save in it)")
     if not gone():

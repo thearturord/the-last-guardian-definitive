@@ -66,6 +66,11 @@ struct FetchShaderData {
     bool Deserialize(Serialization::Archive& buffer);
 };
 
+/// tlg: the shader list of the new engine (native_vkb_shader_list.h, TLG_VKB_SHADER_PREBUILD): a list entry holds the vertex input layout
+/// instead of the fetch shader's code (game code is never copied into the list). While replay_fetch is set (the list's build process,
+/// one entry at a time on its thread), ParseFetchShader gives that layout for a stage that has a fetch shader, without reading code.
+inline thread_local const FetchShaderData* replay_fetch = nullptr;
+
 const u32* GetFetchShaderCode(const Info& info, u32 sgpr_base);
 
 bool ParseFetchShader(const VkbShader::Info& info, FetchShaderData& out_fetch_data);

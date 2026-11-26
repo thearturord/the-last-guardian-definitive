@@ -64,6 +64,14 @@ void tlggpu_save_dialog_close(void);
 void tlggpu_save_progress(int kind, int active, int percent, const char *text);
 /* "Game saved" in the corner (repeats within a few seconds are dropped). */
 void tlggpu_save_toast(int kind);
+/* Trophies (issue #60): the game's trophy file and npbind.dat (copied), the unlock file to keep,
+ * and the game language (trophy text language). Unlock returns 1 for a new unlock (pop-up shown). */
+void tlggpu_trophy_setup(const void *trp, uint64_t trp_size, const void *npbind, uint64_t npbind_size,
+                         const char *store, int language);
+int tlggpu_trophy_unlock(int id);
+void tlggpu_trophy_flags(uint32_t flags[4]);
+int tlggpu_trophy_next_locked(void);
+int tlggpu_trophy_count(void);
 /* 1 while the in-game settings menu is open: the game's pad input is held neutral. */
 int tlggpu_overlay_captures_input(void);
 /* The buttons the game reads now (PS4 pad bits: controller, keyboard and mouse after the
@@ -91,7 +99,7 @@ void tlggpu_mouse_take(TlgGpuMouse *mouse);
 typedef struct {
     int32_t mouse_enabled, invert_y;
     float sensitivity, smoothing, accel, deadzone;
-    char key_map[512];
+    char key_map[1024];
 } TlgGpuInputSettings;
 void tlggpu_input_settings(TlgGpuInputSettings *settings);
 /* Sound output (tlg.ini audio_device, audio_surround), read when an audio port opens. device: the

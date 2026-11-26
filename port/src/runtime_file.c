@@ -115,7 +115,7 @@ void runtime_file_configure(const char *app0,const char *user) {
         runtime_file_mount("/app0",app0);
         runtime_file_mount("/hostapp",app0);
     }
-    /* Mods > ICO horns: the launcher builds the horn models (launcher/ico_horns.py) into
+    /* Mods > ICO horns / Foxtail toy: the launcher builds our models (launcher/foxtail.py) into
      * the user folder; the game opens them as its own optional archive trico_other.psarc. A file
      * mount, so it also works over a packed (.zar) game and leaves the game folder alone. */
     snprintf(path,sizeof(path),"%s/mods-builtin/trico_other.psarc",user);
@@ -123,7 +123,7 @@ void runtime_file_configure(const char *app0,const char *user) {
     if (!stat(path,&horns)) {
         runtime_file_mount("/app0/trico_other.psarc",path);
         runtime_file_mount("/hostapp/trico_other.psarc",path);
-        printf("Runtime: ICO horn models mounted from %s\n",path);
+        printf("Runtime: mod models (ICO horns, foxtail toy) mounted from %s\n",path);
     }
     const char *japanese=getenv("TLG_JAPANESE_FALLBACK");
     if (japanese && !strcmp(japanese,"1"))

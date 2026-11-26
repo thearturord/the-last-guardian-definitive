@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
@@ -16,9 +17,11 @@
 #ifdef _WIN32
 #include <windows.h>
 #endif
+#include "common/hash.h"
 #include "common/serdes.h"
 #include "common/scope_exit.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
+#include "video_core/renderer_vulkan/shader_fields.h"
 #include "video_core/renderer_vulkan/shader_recipe.h"
 #include "common/thread.h"
 #include "tlg_overlay.h"
@@ -589,8 +592,11 @@ void RegisterPipelineData(const ComputePipelineKey& key,
     key.Serialize(ar);
     sdata.Serialize(ar);
 
+    // tlg: a key the shader list lacks goes into the log (ShaderRecipe::LogUnlistedKey).
+    auto bytes = ar.TakeOff();
+    ShaderRecipe::LogUnlistedKey(fmt::format("c_{:#018x}.key", key.value), bytes);
     Storage::DataBase::Instance().Save(Storage::BlobType::PipelineKey,
-                                       fmt::format("c_{:#018x}", key.value), ar.TakeOff());
+                                       fmt::format("c_{:#018x}", key.value), std::move(bytes));
 }
 
 void RegisterPipelineData(const GraphicsPipelineKey& key, u64 hash,
@@ -608,8 +614,11 @@ void RegisterPipelineData(const GraphicsPipelineKey& key, u64 hash,
     key.Serialize(ar);
     sdata.Serialize(ar);
 
+    // tlg: a key the shader list lacks goes into the log (ShaderRecipe::LogUnlistedKey).
+    auto bytes = ar.TakeOff();
+    ShaderRecipe::LogUnlistedKey(fmt::format("g_{:#018x}.key", hash), bytes);
     Storage::DataBase::Instance().Save(Storage::BlobType::PipelineKey,
-                                       fmt::format("g_{:#018x}", hash), ar.TakeOff());
+                                       fmt::format("g_{:#018x}", hash), std::move(bytes));
 }
 
 void RegisterShaderMeta(const Shader::Info& info,
@@ -799,6 +808,151 @@ bool GraphicsPipeline::SerializationSupport::Deserialize(Serialization::Archive&
     return true;
 }
 
+// tlg: the shader list ships pipeline keys in the portable form (shader_fields.h), member by
+// member: the key files hold GraphicsPipelineKey and SerializationSupport as raw bytes, and
+// Windows lays PsColorBuffer (part of the key) out otherwise than Linux.
+namespace {
+
+/// A key file of this build: its version, kind and contents; nullopt when damaged.
+struct KeyFile {
+    u32 version{}, kind{};
+    GraphicsPipelineKey graphics;
+    GraphicsPipeline::SerializationSupport support;
+    u64 compute{};
+};
+
+std::optional<KeyFile> ReadKeyFile(std::span<const u8> bytes) {
+    KeyFile file;
+    Serialization::Archive ar{std::vector<u8>{bytes.begin(), bytes.end()}};
+    try {
+        Serialization::Reader r{ar};
+        r.Read(file.version);
+        r.Read(file.kind);
+        if (file.kind == ShaderFields::KindGraphics) {
+            file.graphics.Deserialize(ar);
+            file.support.Deserialize(ar);
+            // The vertex input vectors are read as raw bytes, their sizes too.
+            const auto& support = file.support;
+            if (support.vertex_attributes.size() > support.vertex_attributes.capacity() ||
+                support.vertex_bindings.size() > support.vertex_bindings.capacity() ||
+                support.divisors.size() > support.divisors.capacity()) {
+                return std::nullopt;
+            }
+        } else if (file.kind == ShaderFields::KindCompute) {
+            ComputePipelineKey key{};
+            key.Deserialize(ar);
+            file.compute = key.value;
+            ComputePipeline::SerializationSupport{}.Deserialize(ar);
+        } else {
+            return std::nullopt;
+        }
+    } catch (const Serialization::CorruptData&) {
+        return std::nullopt;
+    }
+    if (!ar.IsEoS()) {
+        return std::nullopt;
+    }
+    return file;
+}
+
+template <typename T>
+bool SameElements(const T& a, const T& b) {
+    return a.size() == b.size() &&
+           (a.empty() || std::memcmp(a.data(), b.data(), a.size() * sizeof(a[0])) == 0);
+}
+
+/// Two key files hold the same key (PortableKey's check).
+bool SameKey(const KeyFile& a, const KeyFile& b) {
+    if (a.version != b.version || a.kind != b.kind) {
+        return false;
+    }
+    if (a.kind == ShaderFields::KindCompute) {
+        return a.compute == b.compute;
+    }
+    const auto& ma = a.support.multisampling;
+    const auto& mb = b.support.multisampling;
+    return std::memcmp(&a.graphics, &b.graphics, sizeof(a.graphics)) == 0 &&
+           SameElements(a.support.vertex_attributes, b.support.vertex_attributes) &&
+           SameElements(a.support.vertex_bindings, b.support.vertex_bindings) &&
+           SameElements(a.support.divisors, b.support.divisors) && ma == mb &&
+           a.support.tcs == b.support.tcs && a.support.tes == b.support.tes;
+}
+
+/// The key file of `file` as this build writes it (RegisterPipelineData), with its name.
+std::pair<std::string, std::vector<u8>> WriteKeyFile(const KeyFile& file) {
+    Serialization::Archive ar{};
+    Serialization::Writer w{ar};
+    w.Write(file.version);
+    w.Write(file.kind);
+    if (file.kind == ShaderFields::KindGraphics) {
+        file.graphics.Serialize(ar);
+        file.support.Serialize(ar);
+        return {fmt::format("g_{:#018x}.key", std::hash<GraphicsPipelineKey>{}(file.graphics)),
+                ar.TakeOff()};
+    }
+    ComputePipelineKey key{};
+    key.value = file.compute;
+    key.Serialize(ar);
+    ComputePipeline::SerializationSupport{}.Serialize(ar);
+    return {fmt::format("c_{:#018x}.key", file.compute), ar.TakeOff()};
+}
+
+} // namespace
+
+std::optional<std::vector<u8>> PortableKey(std::span<const u8> key_file, std::string& why) {
+    auto file = ReadKeyFile(key_file);
+    if (!file) {
+        why = "is damaged";
+        return std::nullopt;
+    }
+    if (file->version != Serialization::PipelineKeyVersion) {
+        why = "has another key version";
+        return std::nullopt;
+    }
+    if (file->kind == ShaderFields::KindGraphics &&
+        (file->support.multisampling.pNext || file->support.multisampling.pSampleMask)) {
+        why = "holds pointers";
+        return std::nullopt;
+    }
+    ShaderFields::FieldWriter w;
+    ShaderFields::PortableKeyFields(w, file->version, file->kind, file->graphics, file->support,
+                      file->compute);
+    // The portable form must give this key again: the key struct byte for byte (it has no
+    // padding bytes; the unused bits inside its bit-field structs are compared too, so a key
+    // with stray bits there is refused here, not stored under another name), the used vertex
+    // inputs byte for byte, every other member by value. Not the file's bytes: Serialize writes
+    // the vertex input vectors whole, with stale bytes in the slots past their size.
+    std::string name;
+    const auto back_bytes = KeyFromPortable(w.out, name, why);
+    const auto back = back_bytes ? ReadKeyFile(*back_bytes) : std::nullopt;
+    if (!back || !SameKey(*back, *file)) {
+        why = "does not come back the same from the portable form";
+        return std::nullopt;
+    }
+    return std::move(w.out);
+}
+
+std::optional<std::vector<u8>> KeyFromPortable(std::span<const u8> portable, std::string& name,
+                                               std::string& why) {
+    KeyFile file;
+    ShaderFields::FieldReader r{portable};
+    ShaderFields::PortableKeyFields(r, file.version, file.kind, file.graphics, file.support,
+                                    file.compute);
+    if (!r.Done() ||
+        (file.kind != ShaderFields::KindGraphics && file.kind != ShaderFields::KindCompute)) {
+        why = "is damaged";
+        return std::nullopt;
+    }
+    if (file.version != Serialization::PipelineKeyVersion) {
+        why = fmt::format("has key version {} (this build {})", file.version,
+                          Serialization::PipelineKeyVersion);
+        return std::nullopt;
+    }
+    auto [file_name, bytes] = WriteKeyFile(file);
+    name = std::move(file_name);
+    return std::move(bytes);
+}
+
 bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
     sel.graphics_key.Deserialize(ar);
 
@@ -911,12 +1065,156 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
             module = CreateCachedModule(spv, instance.GetDevice());
         }
     }
-    it_pgm.value()->InsertPermut(module, std::move(spec), perm_idx);
+    it_pgm.value()->InsertPermut(module, std::move(spec), perm_idx, Program::Origin::CacheKey);
 
     sel.infos[stage] = &it_pgm.value()->info;
     sel.modules[stage] = module;
 
     return true;
+}
+
+namespace {
+
+/// Missing ends a walk; the others name why a permutation of the cache is not used (counted).
+enum class StoredPermutation { Missing, MetaRefused, NoSpirv, ModuleRefused, Ok };
+
+/// tlg: one permutation of the shader cache (plain cache files): its meta into `info` and
+/// `spec`, its module. Missing: the cache has no meta of this number (asked without opening the
+/// file: the walk ends on such a miss, which is no fault). MetaRefused: the meta is empty, or
+/// LoadShaderMeta refuses it (another version, or a motion vertex shader that is rebuilt every
+/// session), or it is another program or stage; NoSpirv: no SPIR-V beside it; ModuleRefused:
+/// the driver refused the module.
+StoredPermutation ReadStoredPermutation(u64 pgm_hash, size_t perm, Shader::HwStage hw_stage,
+                                        vk::Device device, Shader::Info& info,
+                                        Shader::StageSpecialization& spec,
+                                        vk::ShaderModule& module) {
+    auto& db = Storage::DataBase::Instance();
+    const auto meta_name = fmt::format("{:#018x}", HashCombine(pgm_hash, perm));
+    if (!db.Has(Storage::BlobType::ShaderMeta, meta_name)) {
+        return StoredPermutation::Missing;
+    }
+    std::vector<u8> meta_blob;
+    db.Load(Storage::BlobType::ShaderMeta, meta_name, meta_blob);
+    if (meta_blob.empty()) {
+        return StoredPermutation::MetaRefused;
+    }
+    std::optional<Shader::Gcn::FetchShaderData> fetch;
+    size_t perm_idx{};
+    Serialization::Archive meta_ar{std::move(meta_blob)};
+    if (!LoadShaderMeta(meta_ar, info, fetch, spec, perm_idx) || perm_idx != perm ||
+        info.pgm_hash != pgm_hash || info.hw_stage != hw_stage) {
+        return StoredPermutation::MetaRefused;
+    }
+    std::vector<u32> spv;
+    db.Load(Storage::BlobType::ShaderBinary, fmt::format("{:#018x}_{}", pgm_hash, perm), spv);
+    if (spv.empty()) {
+        return StoredPermutation::NoSpirv;
+    }
+    try {
+        module = CreateCachedModule(spv, device);
+    } catch (...) {
+        return StoredPermutation::ModuleRefused; // the game builds this permutation itself
+    }
+    return StoredPermutation::Ok;
+}
+
+} // namespace
+
+std::unique_ptr<Program> PipelineCache::LoadStoredProgram(u64 pgm_hash, Shader::HwStage hw_stage) {
+    // Plain cache files only (the archive cannot be read while it is written); the profile
+    // check at start cleared a cache of another build or GPU, so what is there is this one's.
+    auto& db = Storage::DataBase::Instance();
+    if (!ShaderRecipe::StoreLookup() || !EmulatorSettings.IsPipelineCacheEnabled() ||
+        !db.ConcurrentReads()) {
+        return nullptr;
+    }
+    std::unique_ptr<Program> program;
+    // Permutations are numbered from 0 in the order they were met; the first missing one
+    // ends the walk. A permutation is used only where its specialization equals the one a
+    // draw needs (GetProgram compares), so one built ahead from other state is never used wrongly.
+    for (size_t perm = 0; perm < 64; ++perm) {
+        // The first permutation's meta gives the program its info; later ones are read into a
+        // scratch info (the same program, other state).
+        auto first = program ? nullptr : std::make_unique<Program>();
+        Program& target = program ? *program : *first;
+        Shader::Info scratch{};
+        Shader::StageSpecialization spec{};
+        spec.info = &target.info;
+        vk::ShaderModule module;
+        if (ReadStoredPermutation(pgm_hash, perm, hw_stage, instance.GetDevice(),
+                                  program ? scratch : target.info, spec,
+                                  module) != StoredPermutation::Ok) {
+            break;
+        }
+        target.InsertPermut(module, std::move(spec), perm, Program::Origin::CacheLookup);
+        if (!program) {
+            program = std::move(first);
+        }
+    }
+    if (program) {
+        ShaderRecipe::NoteLookup(pgm_hash, program->modules.size(), u32(program->info.hw_stage));
+    }
+    return program;
+}
+
+size_t PipelineCache::FillStoredPermutations(Program& program, u64 pgm_hash,
+                                             Shader::HwStage hw_stage) {
+    auto& db = Storage::DataBase::Instance();
+    if (!ShaderRecipe::StoreFill() || !EmulatorSettings.IsPipelineCacheEnabled() ||
+        !db.ConcurrentReads()) {
+        return 0;
+    }
+    // The numbers are the cache's own (the keys, the lookup and this session's builds all use
+    // them), so a permutation goes to its number; one the program holds is not read again. The
+    // walk ends at the first number past the program's own that the cache has no meta for. A
+    // number the game cannot use stays empty, so a build still gets a number of its own, and is
+    // remembered (store_refused), so a later miss of the program does not read it again.
+    struct Found {
+        size_t perm;
+        vk::ShaderModule module;
+        Shader::StageSpecialization spec;
+    };
+    std::vector<Found> found;
+    ShaderRecipe::FillRefused refused{};
+    for (size_t perm = 0; perm < 64; ++perm) {
+        if ((perm < program.modules.size() && program.modules[perm].module) ||
+            (program.store_refused >> perm & 1)) {
+            continue;
+        }
+        Shader::Info scratch{};
+        Shader::StageSpecialization spec{};
+        spec.info = &program.info;
+        vk::ShaderModule module;
+        const auto read = ReadStoredPermutation(pgm_hash, perm, hw_stage, instance.GetDevice(),
+                                                scratch, spec, module);
+        if (read == StoredPermutation::Missing && perm >= program.modules.size()) {
+            break;
+        }
+        if (read == StoredPermutation::Ok) {
+            found.push_back({perm, module, std::move(spec)});
+        } else if (read != StoredPermutation::Missing) {
+            program.store_refused |= u64(1) << perm;
+            refused.meta += read == StoredPermutation::MetaRefused;
+            refused.spirv += read == StoredPermutation::NoSpirv;
+            refused.module += read == StoredPermutation::ModuleRefused;
+        }
+    }
+    if (found.empty()) {
+        ShaderRecipe::NoteFill(pgm_hash, 0, refused, u32(hw_stage));
+        return 0;
+    }
+    {
+        std::unique_lock lock{programs_mutex}; // draw-preparation workers read the list
+        for (auto& f : found) {
+            program.InsertPermut(f.module, std::move(f.spec), f.perm, Program::Origin::CacheLookup);
+        }
+    }
+    ShaderRecipe::NoteFill(pgm_hash, found.size(), refused, u32(hw_stage));
+    return found.size();
+}
+
+void Program::NoteCacheUse(size_t perm_idx, bool lookup) const {
+    ShaderRecipe::NoteCacheUse(info.pgm_hash, perm_idx, u32(info.hw_stage), lookup);
 }
 
 bool PipelineCache::CheckCacheProfile() {
@@ -945,14 +1243,8 @@ bool PipelineCache::CheckCacheProfile() {
         OnColdCache();
         return ImportRecipes();
     }
-    bool compatible = profile_data.size() == CacheHeaderSize + sizeof(Shader::Profile) &&
-                      std::memcmp(profile_data.data(), CacheVersions.data(), CacheHeaderSize) == 0;
-    if (compatible) {
-        Shader::Profile cached_profile{};
-        std::memcpy(&cached_profile, profile_data.data() + CacheHeaderSize, sizeof(cached_profile));
-        compatible = cached_profile == profile;
-    }
-    if (!compatible) {
+    const auto cached_profile = DecodeCacheHeader(profile_data);
+    if (!cached_profile || !(*cached_profile == profile)) {
         // tlg: upstream closed the cache for the session here, so it was never rewritten
         // and every later session compiled every shader again (stutters on each new area).
         // Start a fresh cache for this build and GPU instead.
@@ -968,12 +1260,26 @@ bool PipelineCache::CheckCacheProfile() {
     return true;
 }
 
-void PipelineCache::SaveCacheHeader() {
+std::vector<u8> EncodeCacheHeader(const Shader::Profile& profile) {
     std::vector<u8> data(CacheHeaderSize + sizeof(profile));
     std::memcpy(data.data(), CacheVersions.data(), CacheHeaderSize);
     std::memcpy(data.data() + CacheHeaderSize, &profile, sizeof(profile));
+    return data;
+}
+
+std::optional<Shader::Profile> DecodeCacheHeader(std::span<const u8> data) {
+    if (data.size() != CacheHeaderSize + sizeof(Shader::Profile) ||
+        std::memcmp(data.data(), CacheVersions.data(), CacheHeaderSize) != 0) {
+        return std::nullopt;
+    }
+    Shader::Profile profile{};
+    std::memcpy(&profile, data.data() + CacheHeaderSize, sizeof(profile));
+    return profile;
+}
+
+void PipelineCache::SaveCacheHeader() {
     Storage::DataBase::Instance().Save(Storage::BlobType::ShaderProfile, "profile",
-                                       std::move(data));
+                                       EncodeCacheHeader(profile));
 }
 
 // bbport: a damaged entry (cut short by a crash or a power loss, or rejected by the driver) used
@@ -1009,6 +1315,7 @@ void PipelineCache::WarmUp(const std::function<void(u32, u32)>& progress) {
     if (!CheckCacheProfile()) {
         return;
     }
+    ShaderRecipe::WaitImport("pipeline warm-up"); // shader_prebuild on: the list's shaders
 
     u32 num_pipelines{};
     u32 num_total_pipelines{};
@@ -1183,6 +1490,14 @@ bool PipelineCache::StartBackgroundWarmUp() {
     warm.pool = std::make_unique<WarmupPool>(warm.threads, true);
     // The first job reads the whole store; with one thread the builds queue behind it.
     warm.pool->Push([this, &warm] {
+        // shader_prebuild on: the store is read once the background shader build is done.
+        ShaderRecipe::WaitImport(
+            "pipeline warm-up",
+            [](void* arg) {
+                return static_cast<BackgroundWarmup*>(arg)->stopping.load(
+                    std::memory_order_relaxed);
+            },
+            &warm);
         const auto reader_started = std::chrono::steady_clock::now();
         auto& db = Storage::DataBase::Instance();
         warm.total = u32(db.CountBlobs(Storage::BlobType::PipelineKey));
@@ -1289,7 +1604,8 @@ bool PipelineCache::MergeWarmStage(WarmStage& stage) {
     const auto it_pgm = program_cache.find(hash);
     if (it_pgm == program_cache.end()) {
         Program* program = stage.program.get();
-        program->InsertPermut(stage.module, std::move(stage.spec), stage.perm_idx);
+        program->InsertPermut(stage.module, std::move(stage.spec), stage.perm_idx,
+                              Program::Origin::CacheKey);
         program_cache.emplace(hash, std::move(stage.program));
         stage.module_kept = true;
         stage.result = stage.module;
@@ -1312,7 +1628,8 @@ bool PipelineCache::MergeWarmStage(WarmStage& stage) {
             return false;
         }
         stage.spec.info = &program.info;
-        program.InsertPermut(stage.module, std::move(stage.spec), stage.perm_idx);
+        program.InsertPermut(stage.module, std::move(stage.spec), stage.perm_idx,
+                             Program::Origin::CacheKey);
         stage.module_kept = true;
         stage.result = stage.module;
     }

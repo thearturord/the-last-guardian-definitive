@@ -10,6 +10,8 @@
 #include "native/native_vkb_indexed.h"
 #include "native/native_vkb_compute.h"
 #include "native/native_zpass_gen.h"
+#include "native/native_vkb_shader_recipe.h"
+#include "native/native_vkb_shader_store.h"
 
 #include "native/shadps4/video_core/renderer_vulkan/vk_common.h"
 
@@ -56,6 +58,7 @@
 #include "native/shadps4/video_core/amdgpu/regs_shader.h"
 #include "native/shadps4/video_core/renderer_vulkan/vk_fixed_state.h"
 #include "native/native_vkb_pipeline.h"
+#include "native/native_vkb_pipeline_warm.h"
 #include "native/vkb_core/vkb_device.h"
 #include "native/vkb_core/liverpool_to_vk.h"
 #include "native/shadps4/video_core/renderer_vulkan/vk_instance.h"
@@ -99,6 +102,8 @@ struct Stage {
     bool has_flat{};
     std::unique_ptr<VkbShader::Info> info;
     VkbShader::RuntimeInfo runtime{};
+    VkbShader::RuntimeInfo runtime_in{};   ///< the runtime info and bindings as handed to the translator (the store's inputs: the pipeline
+    VkbShader::Backend::Bindings start_in{}; ///< warm-up names the list entry of this stage by them)
     vk::ShaderModule module{};
     std::vector<Source> buffers, images, samplers;
     u32 row_start{}; ///< R2 (record mode): the stage's first entry in the draw's row
@@ -178,6 +183,7 @@ bool Ready() {
     profile = Core::Vkb::Device::Profile();
     record_profile = profile;
     record_profile.constant_offsets = true;
+    Core::Vkb::ShaderStore::Open(profile); // TLG_VKB_SHADER_PREBUILD (no-op when off)
     pools = std::make_unique<VkbShader::Pools>();
     return true;
 }
@@ -636,13 +642,32 @@ bool CompileStage(u64 ctx, u64 shader, u32 stage, u64 code_address, Stage& out, 
     out.info->constant_offsets = record; // (the row layout's two entries behind a read-only guest buffer's slot)
     out.row_start = binding.indexed;
     std::vector<u32> spv;
-    // issue 135: a stage translated before with the same code, settings and resource kinds is taken from the reuse list (the event-start hitches were mostly translations)
-    static const u64 probe_ps = [] { const char* e = std::getenv("TLG_VKB_TEST_PS_PROBE"); return e != nullptr ? std::strtoull(e, nullptr, 16) : 0ull; }();
-    const bool reuse = TranslationReuseOn() && probe_ps == 0 && !Core::Vkb::FlatCensus::On();
+    // note 41, test only: TLG_VKB_TEST_PS_PROBE=<pixel shader hash>: render target 3 gets the coordinates of the shader's first 2D texture sample (x, y) and the first
+    // barycentric weight they use (z), so a G-buffer dump shows what the shader receives
+    static const u64 probe = [] { const char* e = std::getenv("TLG_VKB_TEST_PS_PROBE"); return e != nullptr ? std::strtoull(e, nullptr, 16) : 0ull; }();
+    // TLG_VKB_SHADER_MEMO / TLG_VKB_SHADER_PREBUILD (shader store): a stage translated before with the same inputs, in this session (or an earlier one, on disk), is taken from the store;
+    // issue 135: a stage the store lacks may still be in the reuse list (same code, settings and resource kinds, this session). The debug census and the probe work on the
+    // translated program, so with them on every stage is translated
+    namespace Store = Core::Vkb::ShaderStore;
+    const bool debug_tool = Core::Vkb::FlatCensus::On() || probe != 0;
+    const Store::Mode store_mode = debug_tool ? Store::Mode::Off : Store::GetMode();
+    if (debug_tool && Store::GetMode() != Store::Mode::Off) {
+        Store::NoteBypass();
+    }
+    const bool reuse = TranslationReuseOn() && !debug_tool;
     const u64 reuse_key = Mix(Mix(Mix(binary.shader_hash, binary.length), params.Base()), static_cast<u64>(stage) << 1 | (record ? 1u : 0u));
     const VkbShader::RuntimeInfo runtime_in = out.runtime;
     const VkbShader::Backend::Bindings binding_in = binding;
-    if (!reuse || !TranslationReuseFind(reuse_key, *out.info, out.runtime, binding, spv)) {
+    const Store::Inputs store_in{.params = params, .runtime = runtime_in, .start = binding, .salt = record ? 1u : 0u}; // R2: a record-mode stage is another translation
+    out.runtime_in = runtime_in;
+    out.start_in = binding;
+    Store::Translation stored;
+    const bool found = store_mode != Store::Mode::Off && Store::Find(store_in, stored);
+    const bool reused = !found && reuse && TranslationReuseFind(reuse_key, *out.info, out.runtime, binding, spv);
+    if (!reused && (!found || store_mode == Store::Mode::Check)) {
+        // TLG_VKB_SHADER_RECIPES: a stage the store lacks also keeps its recipe (the guest memory the translation reads, recorded on this thread)
+        Core::Vkb::ShaderRecipe::Recording recording{!found && store_mode != Store::Mode::Off && Store::OnDisk() && Core::Vkb::ShaderRecipe::On()};
+        const u64 translate_t0 = NowNs();
         const auto program = VkbShader::TranslateProgram(params.code, *pools, *out.info, out.runtime, stage_profile);
         if (out.info->translation_failed) {
             c_fail[FailTranslation].fetch_add(1, std::memory_order_relaxed);
@@ -651,9 +676,6 @@ bool CompileStage(u64 ctx, u64 shader, u32 stage, u64 code_address, Stage& out, 
         if (Core::Vkb::FlatCensus::On()) { // note 77 census (debug)
             Core::Vkb::FlatCensus::Note(program, shader ? Rd<u64>(shader, 0x120) : 0, inputs_offset, stage == 0 ? "vs" : "ps", out.info->pgm_hash);
         }
-        // note 41, test only: TLG_VKB_TEST_PS_PROBE=<pixel shader hash>: render target 3 gets the coordinates of the shader's first 2D texture sample (x, y) and the first
-        // barycentric weight they use (z), so a G-buffer dump shows what the shader receives
-        static const u64 probe = [] { const char* e = std::getenv("TLG_VKB_TEST_PS_PROBE"); return e != nullptr ? std::strtoull(e, nullptr, 16) : 0ull; }();
         if (probe != 0 && sw == VkbShader::SwStage::Fragment && out.info->pgm_hash == probe) {
             VkbShader::IR::Inst* coords = nullptr;
             for (VkbShader::IR::Block* block : program.blocks) {
@@ -687,6 +709,18 @@ bool CompileStage(u64 ctx, u64 shader, u32 stage, u64 code_address, Stage& out, 
         if (reuse) {
             TranslationReuseAdd(reuse_key, *out.info, runtime_in, out.runtime, binding_in, binding, spv);
         }
+        if (!found) {
+            Store::NoteBuild(params.hash, static_cast<u32>(hw));
+            if (store_mode != Store::Mode::Off && Store::Keep(store_in, stage_profile, *out.info, out.runtime, binding, spv, {}, NowNs() - translate_t0)) {
+                recording.Take(store_in, *out.info, 0);
+            }
+        }
+    }
+    if (found && (store_mode != Store::Mode::Check || Store::Same(store_in, stored, *out.info, out.runtime, binding, spv, {}))) {
+        out.info = std::move(stored.info);
+        out.runtime = stored.runtime;
+        binding = stored.end;
+        spv = std::move(stored.spv);
     }
     { // debug: TLG_VKB_DUMP_SPV=<hashes, hex, comma separated>: each compiled stage of those shaders -> log/vkb_spv/<vs|ps>_<hash>_<n>.spv, its GCN code (.gcn) and user data (.ud)
         static const std::vector<u64> dump_spv = [] {
@@ -1040,7 +1074,11 @@ void Compile(u64 ctx, u64 vs, u64 ps, u64 fetch_object, const VkbVulkan::FixedSt
         }
         v.row_dwords = binding.indexed;
     }
-    v.pipeline = std::make_unique<VkbVulkan::Vkb::GraphicsPipeline>(*instance, Core::Vkb::Device::Scheduler(), Core::Vkb::Device::DescHeap(), record ? record_profile : profile, key, vk::PipelineCache{},
+    if (!record) { // the warm-up builds the list's pipelines with the plain profile
+        Core::Vkb::PipelineWarm::Check(key, static_cast<u32>(v.depth_format), {&v.vs.runtime_in, &v.vs.start_in},
+                                       v.has_ps ? Core::Vkb::PipelineWarm::StageInputs{&v.ps.runtime_in, &v.ps.start_in} : Core::Vkb::PipelineWarm::StageInputs{}); // is this pipeline among the list's converted keys
+    }
+    v.pipeline = std::make_unique<VkbVulkan::Vkb::GraphicsPipeline>(*instance, Core::Vkb::Device::Scheduler(), Core::Vkb::Device::DescHeap(), record ? record_profile : profile, key, vk::PipelineCache{Core::Vkb::PipelineWarm::Cache()},
                                                              std::span<const VkbShader::Info*, VkbVulkan::Vkb::MaxShaderStages>{infos},
                                                              std::span<const VkbShader::RuntimeInfo, VkbVulkan::Vkb::MaxShaderStages>{runtimes}, v.has_fetch ? &v.fetch : nullptr,
                                                              std::span<const vk::ShaderModule>{modules}, sdata, false, v.depth_format,
@@ -4231,6 +4269,8 @@ nlohmann::json Report() {
             {"unsupported_layout_type_bits", fmt::format("{:#x}", c_unsupported_layout_bits.load())},
             {"depth_only_variants", c_depth_only.load()},
             {"compile_ms_mean", compiled ? static_cast<double>(c_compile_ns.load()) / 1e6 / static_cast<double>(compiled) : 0.0},
+            {"shader_store", Core::Vkb::ShaderStore::Report()}, // TLG_VKB_SHADER_PREBUILD: graphics and compute stages
+            {"shader_recipes", Core::Vkb::ShaderRecipe::Report()}, // TLG_VKB_SHADER_RECIPES
             {"key_check_draws_differences", {c_key_checks.load(), c_key_differences.load()}},
             {"variant_key_us_mean", draws ? static_cast<double>(c_key_ns.load()) / 1e3 / static_cast<double>(draws) : 0.0},
             {"slot_map_mapped_unmapped", {{"vertex", src(0)}, {"pixel", src(1)}}},

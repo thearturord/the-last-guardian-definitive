@@ -210,6 +210,16 @@ TemporalUpscaler::TemporalUpscaler(const Instance& instance_, Scheduler& schedul
                         : dlss->Problem();
         TlgSettings::ConfigureDlssSupport(dlss && dlss->Available(), problem.c_str());
     }
+    {
+        const Xess* xess = Xess::Get();
+        static std::string problem;
+#ifdef _WIN32
+        problem = !xess ? "libxess.dll is not installed" : xess->Problem();
+#else
+        problem = "XeSS is only available on Windows";
+#endif
+        TlgSettings::ConfigureXessSupport(xess && xess->Available(), problem.c_str());
+    }
     // Available unless TLG_UPSCALER=none; on/off and the parameters are the menu's settings.
     const char* env = std::getenv("TLG_UPSCALER");
     enabled = !(env && std::strcmp(env, "none") == 0);
@@ -275,13 +285,14 @@ bool TemporalUpscaler::Active() const {
            (TlgSettings::Get().upscaler == TlgSettings::UpscalerFsr3 ||
             TlgSettings::IsFsr4(TlgSettings::Get().upscaler) ||
             TlgSettings::Get().upscaler == TlgSettings::UpscalerTaa ||
-            TlgSettings::Get().upscaler == TlgSettings::UpscalerDlss) &&
+            TlgSettings::Get().upscaler == TlgSettings::UpscalerDlss ||
+            TlgSettings::Get().upscaler == TlgSettings::UpscalerXess) &&
            !TlgToggle::Disabled(1u << 24);
 }
 
 bool TemporalUpscaler::ReactiveOn() const {
     // FSR 4 takes no reactive mask: the opaque snapshot and the mask pass would be wasted.
-    return TlgSettings::Get().reactive && !TlgToggle::Disabled(1u << 27) && !UseFsr4() && !UseDlss() &&
+    return TlgSettings::Get().reactive && !TlgToggle::Disabled(1u << 27) && !UseFsr4() && !UseMl() &&
            TlgSettings::Get().upscaler != TlgSettings::UpscalerTaa;
 }
 
@@ -339,6 +350,7 @@ bool TemporalUpscaler::OnFrameStart() {
     if (resolution_patch && TlgSettings::Get().upscaler != TlgSettings::UpscalerOff &&
         TlgSettings::Get().upscaler != TlgSettings::UpscalerTaa &&
         TlgSettings::Get().upscaler != TlgSettings::UpscalerDlss &&
+        TlgSettings::Get().upscaler != TlgSettings::UpscalerXess &&
         TlgSettings::Get().upscaler != TlgSettings::UpscalerFsr3 &&
         TlgSettings::Get().upscaler != TlgSettings::UpscalerFsr4) {
         TlgSettings::Get().upscaler.store(TlgSettings::UpscalerOff);
@@ -421,7 +433,7 @@ bool TemporalUpscaler::OnFrameStart() {
     mask_ready = false;
     // tlg: game-motion DLAA jitters only frames DLSS resolves (unresolved jitter shimmers);
     // FSR 3.1 and FSR 4 native AA resolve them the same way.
-    jitter_active = jitter_on && (UseDlss() || FsrNativeAa() || TaaNativeAa()) && !Scaled();
+    jitter_active = jitter_on && (UseMl() || FsrNativeAa() || TaaNativeAa()) && !Scaled();
     // Halton(2, 3); the menu or toggle 1 << 25 disables it.
     if (!jitter_on) {
         jitter = {};
@@ -484,9 +496,10 @@ void TemporalUpscaler::OnDispatch(u64 cs_hash) {
         return;
     }
     // tlg: DLSS only runs as DLAA on the game's motion (above); the generic scene path made it shake.
-    // FSR 3.1 native AA runs there too.
+    // FSR 3.1 native AA runs there too. XeSS follows DLSS.
     if (cs_hash != trigger_hash || done_this_frame || failed || Scaled() || GameMotion() ||
-        TlgSettings::Get().upscaler == TlgSettings::UpscalerDlss) {
+        TlgSettings::Get().upscaler == TlgSettings::UpscalerDlss ||
+        TlgSettings::Get().upscaler == TlgSettings::UpscalerXess) {
         return;
     }
     done_this_frame = true;
@@ -499,7 +512,7 @@ void TemporalUpscaler::OnDispatch(u64 cs_hash) {
 
 bool TemporalUpscaler::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool hdr) {
     // DLSS, like FSR 4, has its own context: no portable FSR 3 context is made.
-    const bool use_fsr4 = UseFsr4() || UseDlss();
+    const bool use_fsr4 = UseFsr4() || UseMl();
     const bool use_taa = TlgSettings::Get().upscaler == TlgSettings::UpscalerTaa;
     if (use_taa && (w != ow || h != oh)) {
         std::printf("TAA: remove TLG_RENDER_RES to use native-resolution TAA\n");
@@ -652,7 +665,8 @@ bool TemporalUpscaler::EnsureResources(u32 w, u32 h, u32 ow, u32 oh, bool hdr) {
         return true;
     }
     if (use_fsr4) {
-        std::printf("Upscaler: FSR 4 inputs %ux%u -> %ux%u\n", w, h, ow, oh);
+        std::printf("Upscaler: %s inputs %ux%u -> %ux%u\n",
+                    UseXess() ? "XeSS" : UseMl() ? "DLSS" : "FSR 4", w, h, ow, oh);
         return true;
     }
     FfxVkPortableMemoryUsage usage{};
@@ -1332,7 +1346,7 @@ void TemporalUpscaler::RunGameMotion() {
         return;
     }
     const bool taa = TaaNativeAa();
-    const char* provider = taa ? "TAA" : UseDlss() ? "DLAA" : UseFsr4() ? "FSR 4 native AA" : "FSR 3.1 native AA";
+    const char* provider = taa ? "TAA" : UseXess() ? "XeSS native AA" : UseMl() ? "DLAA" : UseFsr4() ? "FSR 4 native AA" : "FSR 3.1 native AA";
     const char* profile_path = provider;
     AaCpuTimer cpu_timer{provider};
     static const char* logged = nullptr;
@@ -1395,8 +1409,8 @@ void TemporalUpscaler::RunGameMotion() {
         RecordTaa(cmdbuf, color_view, depth_view);
         jitter = current_jitter;
     }
-    const bool ok = taa ? true : UseDlss()
-        ? RecordDlss(cmdbuf,
+    const bool ok = taa ? true : UseMl()
+        ? RecordMl(cmdbuf,
                      {color.GetImage(), color_view, color.info.pixel_format,
                       vk::ImageAspectFlagBits::eColor, w, h},
                      {depth.GetImage(), depth_view, depth_format, vk::ImageAspectFlagBits::eDepth,
@@ -1417,7 +1431,7 @@ void TemporalUpscaler::RunGameMotion() {
     TlgSettings::MarkAaSharpened(SharpenerName()); // the presenter skips CAS: one sharpener per frame
     AaMark(profile_path, "3 sharpen");
     if (taa) {
-    } else if (UseDlss()) {
+    } else if (UseMl()) {
         DlssSharpen(cmdbuf, w, h);
     } else {
         ExtraSharpen(cmdbuf, vk::Image(output_image), false, w, h);
@@ -1581,8 +1595,8 @@ void TemporalUpscaler::Run() {
         dispatched = RecordFsr4(cmdbuf, {input_color, input_color_view, w, h},
                                 {input_depth, input_depth_view, w, h}, w, h, ow, oh, frame_ms,
                                 jitter);
-    } else if (UseDlss()) {
-        dispatched = RecordDlss(
+    } else if (UseMl()) {
+        dispatched = RecordMl(
             cmdbuf,
             {input_color, input_color_view, color.info.pixel_format, vk::ImageAspectFlagBits::eColor, w, h},
             {input_depth, input_depth_view, depth_format, vk::ImageAspectFlagBits::eDepth, w, h}, w, h,
@@ -1596,7 +1610,7 @@ void TemporalUpscaler::Run() {
         reset = false;
         dispatched_last_frame = true;
         TlgSettings::MarkAaSharpened(SharpenerName()); // the presenter skips CAS: one sharpener per frame
-        if (UseDlss()) {
+        if (UseMl()) {
             DlssSharpen(cmdbuf, ow, oh);
         } else if (TlgSettings::Get().upscaler != TlgSettings::UpscalerTaa) {
             ExtraSharpen(cmdbuf, vk::Image(output_image), false, ow, oh);
@@ -1719,7 +1733,7 @@ float TemporalUpscaler::SceneMipBias() const {
     float bias = render > 0.0f && render < output ? std::log2(render / output) : 0.0f;
     // DLSS and FSR guides: log2(render / output) - 1; the resolve keeps the extra detail stable.
     // tlg: Lab tab lod_bias, in quarter steps (default -4: the guide's -1).
-    if ((UseDlss() || FsrNativeAa()) && TlgSettings::AaOn()) {
+    if ((UseMl() || FsrNativeAa()) && TlgSettings::AaOn()) {
         bias += TlgSettings::Get().lod_bias.load() * 0.25f;
     }
     return bias;
@@ -1925,7 +1939,7 @@ bool TemporalUpscaler::EnlargeEngineHdr(VideoCore::ImageId src) {
 
 bool TemporalUpscaler::EngineUpscale() const {
     // DLSS, FSR 4 or FSR 3.1 (with the AA setting on, like native AA) on the game's motion.
-    return engine_upscale && !engine_failed && GameMotion() && (UseDlss() || FsrNativeAa());
+    return engine_upscale && !engine_failed && GameMotion() && (UseMl() || FsrNativeAa());
 }
 
 void TemporalUpscaler::EnsureEngineHdrImage(u32 w, u32 h) {
@@ -1962,7 +1976,7 @@ void TemporalUpscaler::EnsureEngineHdrImage(u32 w, u32 h) {
         engine_hdr_h = h;
         std::printf("Engine upscale: HDR, the game's PS_Upscale reads the %s image (%ux%u, "
                     "format %d)\n",
-                    !EngineUpscale() ? "enlarged" : UseDlss() ? "DLSS" : UseFsr4() ? "FSR 4"
+                    !EngineUpscale() ? "enlarged" : UseXess() ? "XeSS" : UseMl() ? "DLSS" : UseFsr4() ? "FSR 4"
                                                                        : "FSR 3.1",
                     w, h,
                     int(engine_hdr_format));
@@ -2099,7 +2113,7 @@ bool TemporalUpscaler::RunGameUpscale(VideoCore::ImageId ldr, VideoCore::ImageId
     static bool logged = false;
     if (!std::exchange(logged, true)) {
         std::printf("Engine upscale: %s %ux%u -> %ux%u on the game's motion vectors, replacing "
-                    "PS_Upscale\n", UseDlss() ? "DLSS" : UseFsr4() ? "FSR 4" : "FSR 3.1", w, h, ow, oh);
+                    "PS_Upscale\n", UseXess() ? "XeSS" : UseMl() ? "DLSS" : UseFsr4() ? "FSR 4" : "FSR 3.1", w, h, ow, oh);
         std::printf("Engine upscale: target #%u format %d usage %x tiled %u mips %u layers %u, "
                     "input #%u format %d\n", target.index, int(out.info.pixel_format),
                     u32(out.usage_flags), u32(out.info.props.is_tiled), out.info.resources.levels,
@@ -2135,7 +2149,7 @@ bool TemporalUpscaler::RunGameUpscale(VideoCore::ImageId ldr, VideoCore::ImageId
         CachedView(motion, vk::Format::eR16G16Sfloat, vk::ImageAspectFlagBits::eColor);
     const auto depth_view = CachedView(depth, depth_format, vk::ImageAspectFlagBits::eDepth);
     const char* profile_path =
-        UseDlss() ? "DLSS upscale" : UseFsr4() ? "FSR 4 upscale" : "FSR 3.1 upscale";
+        UseXess() ? "XeSS upscale" : UseMl() ? "DLSS upscale" : UseFsr4() ? "FSR 4 upscale" : "FSR 3.1 upscale";
     AaCpuTimer cpu_timer{profile_path};
 
     scheduler.EndRendering();
@@ -2183,7 +2197,7 @@ bool TemporalUpscaler::RunGameUpscale(VideoCore::ImageId ldr, VideoCore::ImageId
     AaMark(profile_path, "2 DLSS / FSR");
     cpu_timer.CallStart();
     const bool ok =
-        UseDlss() ? RecordDlss(cmdbuf,
+        UseMl() ? RecordMl(cmdbuf,
                                {color.GetImage(), color_view, in_format,
                                 vk::ImageAspectFlagBits::eColor, w, h},
                                {depth.GetImage(), depth_view, depth_format,
@@ -2203,7 +2217,7 @@ bool TemporalUpscaler::RunGameUpscale(VideoCore::ImageId ldr, VideoCore::ImageId
     }
     TlgSettings::MarkAaSharpened(SharpenerName()); // the presenter skips CAS: one sharpener per frame
     AaMark(profile_path, "3 sharpen");
-    if (UseDlss()) {
+    if (UseMl()) {
         DlssSharpen(cmdbuf, ow, oh);
     } else {
         ExtraSharpen(cmdbuf, vk::Image(output_image), false, ow, oh);
@@ -2527,15 +2541,15 @@ void TemporalUpscaler::RunScaled() {
     last_frame = now;
 
     // tlg: FSR 4 writes its HDR-format output, copied into the output-size UI image.
-    if (UseFsr4() || UseDlss() || TlgSettings::Get().upscaler == TlgSettings::UpscalerTaa) {
+    if (UseFsr4() || UseMl() || TlgSettings::Get().upscaler == TlgSettings::UpscalerTaa) {
         barrier(vk::Image(output_image), vk::ImageAspectFlagBits::eColor,
                 vk::ImageLayout::eUndefined, all, vk::AccessFlagBits2::eNone,
                 vk::ImageLayout::eGeneral, all, rw);
         bool ok4 = true;
         if (TlgSettings::Get().upscaler == TlgSettings::UpscalerTaa) {
             RecordTaa(cmdbuf, color_view, depth_view);
-        } else if (UseDlss()) {
-            ok4 = RecordDlss(cmdbuf,
+        } else if (UseMl()) {
+            ok4 = RecordMl(cmdbuf,
                              {color_image, color_view, color.info.pixel_format,
                               vk::ImageAspectFlagBits::eColor, source_width, source_height},
                              {depth_image, depth_view, depth_format, vk::ImageAspectFlagBits::eDepth,
@@ -2548,7 +2562,7 @@ void TemporalUpscaler::RunScaled() {
         }
         if (ok4) {
             TlgSettings::MarkAaSharpened(SharpenerName()); // the presenter skips CAS: one sharpener per frame
-            if (UseDlss()) {
+            if (UseMl()) {
                 DlssSharpen(cmdbuf, ow, oh);
             } else if (TlgSettings::Get().upscaler != TlgSettings::UpscalerTaa) {
                 ExtraSharpen(cmdbuf, vk::Image(output_image), false, ow, oh);
@@ -3032,7 +3046,11 @@ bool TemporalUpscaler::RecordFsr4(vk::CommandBuffer cmdbuf, Fsr4Upscaler::Image 
 }
 
 bool TemporalUpscaler::SkipGameSmaa(u64 vs_hash) const {
-    return vs_hash == 0x0a449aef && GameMotion() &&
+    // Also cleared with the anti-aliasing row's Off (no AA at all, not the game's own SMAA).
+    const auto& settings = TlgSettings::Get();
+    const bool no_aa = settings.upscaler == TlgSettings::UpscalerOff && !settings.game_smaa &&
+                       TlgSettings::RenderPreset() == TlgSettings::NativeAA && !TlgSettings::AaOn();
+    return vs_hash == 0x0a449aef && (GameMotion() || no_aa) &&
            !TlgToggle::Disabled(TlgToggle::DlaaSkipGameSmaa);
 }
 
@@ -3046,7 +3064,8 @@ bool TemporalUpscaler::FsrNativeAa() const {
 
 const char* TemporalUpscaler::SharpenerName() const {
     return TlgSettings::Get().upscaler == TlgSettings::UpscalerTaa ? "TAA sharpening"
-           : UseDlss()                                            ? "RCAS after DLSS"
+           : UseXess()                                          ? "RCAS after XeSS"
+           : UseMl()                                            ? "RCAS after DLSS"
                                                                   : "FSR's own RCAS";
 }
 
@@ -3100,6 +3119,97 @@ bool TemporalUpscaler::RecordDlss(vk::CommandBuffer cmdbuf, const Dlss::Resource
         std::printf("Upscaler: DLSS failed; falling back to FSR 3.1\n");
         TlgSettings::FallBackToFsr3();
         dlss_failed = true; // EnsureResources creates the FSR 3 context next frame
+        reset = true;
+    }
+    return ok;
+}
+
+bool TemporalUpscaler::UseXess() const {
+    const Xess* xess = Xess::Get();
+    return TlgSettings::Get().upscaler == TlgSettings::UpscalerXess && xess && xess->Available() &&
+           !xess_failed;
+}
+
+bool TemporalUpscaler::RecordXess(vk::CommandBuffer cmdbuf, const Dlss::Resource& color,
+                                  const Dlss::Resource& depth, u32 w, u32 h, u32 ow, u32 oh,
+                                  bool hdr, std::array<float, 2> frame_jitter) {
+    Xess* xess = Xess::Get();
+    const Xess::FeatureDesc desc{w, h, ow, oh, Xess::QualityForScale(float(ow) / float(w)), hdr,
+                                 !TlgToggle::Disabled(TlgToggle::DlssAutoExposure)};
+    bool ok = true;
+    if (!xess->HasFeature(desc)) {
+        // The previous context may still be in use by submitted work; `cmdbuf` stays open.
+        scheduler.WaitSubmitted();
+        xess->ReleaseFeature();
+        ok = xess->CreateFeature(desc);
+        reset = true;
+    }
+    if (ok) {
+        // XeSS reads its inputs in ShaderReadOnlyOptimal (the port keeps them in General) and
+        // writes the output in General; it records no barriers itself.
+        const bool stencil = depth.format == vk::Format::eD32SfloatS8Uint ||
+                             depth.format == vk::Format::eD24UnormS8Uint ||
+                             depth.format == vk::Format::eD16UnormS8Uint;
+        const vk::ImageAspectFlags depth_aspect =
+            stencil ? depth.aspect | vk::ImageAspectFlagBits::eStencil : depth.aspect;
+        const vk::Image inputs[] = {color.image, depth.image, vk::Image(motion_image)};
+        const vk::ImageAspectFlags aspects[] = {color.aspect, depth_aspect,
+                                                vk::ImageAspectFlagBits::eColor};
+        const auto transition = [&](vk::ImageLayout from, vk::ImageLayout to, bool before) {
+            std::array<vk::ImageMemoryBarrier2, 3> barriers{};
+            for (size_t i = 0; i < barriers.size(); ++i) {
+                barriers[i] = vk::ImageMemoryBarrier2{
+                    .srcStageMask = before ? vk::PipelineStageFlagBits2::eAllCommands
+                                           : vk::PipelineStageFlagBits2::eComputeShader,
+                    .srcAccessMask = before ? vk::AccessFlagBits2::eMemoryWrite
+                                            : vk::AccessFlagBits2::eNone,
+                    .dstStageMask = before ? vk::PipelineStageFlagBits2::eComputeShader
+                                           : vk::PipelineStageFlagBits2::eAllCommands,
+                    .dstAccessMask = before ? vk::AccessFlagBits2::eShaderRead
+                                            : vk::AccessFlagBits2::eMemoryRead |
+                                                  vk::AccessFlagBits2::eMemoryWrite,
+                    .oldLayout = from,
+                    .newLayout = to,
+                    .image = inputs[i],
+                    .subresourceRange = {aspects[i], 0, 1, 0, 1},
+                };
+            }
+            cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount = u32(barriers.size()),
+                                     .pImageMemoryBarriers = barriers.data()});
+        };
+        transition(vk::ImageLayout::eGeneral, vk::ImageLayout::eShaderReadOnlyOptimal, true);
+        // The jitter and motion vectors DLSS gets: render pixels, current to previous.
+        const float sign = TlgToggle::Disabled(1u << 26) ? -1.0f : 1.0f;
+        const auto as_xess = [](const Dlss::Resource& r) {
+            return Xess::Resource{r.image, r.view, r.format, r.aspect, r.width, r.height};
+        };
+        ok = xess->Evaluate(cmdbuf, {
+            .color = as_xess(color),
+            .depth = as_xess(depth),
+            .motion = {vk::Image(motion_image), *motion_view, vk::Format::eR16G16Sfloat,
+                       vk::ImageAspectFlagBits::eColor, w, h},
+            .output = {vk::Image(output_image), *output_view, vk::Format::eR16G16B16A16Sfloat,
+                       vk::ImageAspectFlagBits::eColor, ow, oh},
+            .input_width = w,
+            .input_height = h,
+            .jitter_x = sign * frame_jitter[0],
+            .jitter_y = sign * frame_jitter[1],
+            .reset = reset,
+        });
+        transition(vk::ImageLayout::eShaderReadOnlyOptimal, vk::ImageLayout::eGeneral, false);
+        // The output: XeSS's compute writes before the RCAS / copy that follow.
+        const vk::MemoryBarrier2 written{
+            .srcStageMask = vk::PipelineStageFlagBits2::eComputeShader,
+            .srcAccessMask = vk::AccessFlagBits2::eShaderWrite,
+            .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+        };
+        cmdbuf.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &written});
+    }
+    if (!ok) {
+        std::printf("Upscaler: XeSS failed; falling back to FSR 3.1\n");
+        TlgSettings::FallBackToFsr3();
+        xess_failed = true; // EnsureResources creates the FSR 3 context next frame
         reset = true;
     }
     return ok;

@@ -35,7 +35,7 @@ MAX_BYTES = 1 << 20
 # launcher settings a preset may carry: key -> 'bool' or the allowed values. The GPU readback mode
 # (gpu_readbacks) and the readback rows (backports_table.NOT_IN_PRESETS) are Advanced settings:
 # never exported, and skipped without a warning in files that still carry them.
-EXPORT_SETTINGS = {'vsync': 'bool', 'show_fps': 'bool', 'frame_rate': ('30', '60', 'unlocked')}
+EXPORT_SETTINGS = {'vsync': 'bool', 'show_fps': 'bool', 'frame_rate': ('30', '60', '120', 'unlocked')}
 NOT_IN_PRESETS_SETTINGS = ('gpu_readbacks',)
 SETTING_DEFAULTS = {'show_fps': False, **gfxlogic.SETTING_DEFAULTS}
 
