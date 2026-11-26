@@ -144,6 +144,7 @@ IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Inf
         VkbShader::Optimization::InterpolatedIntegerPass(program);
     }
     VkbShader::Optimization::ReadsOutOfBranchPass(program, profile.reads_out_of_branch); // tlg issue 75
+    VkbShader::Optimization::LeafAmbientOcclusionPass(program, profile); // tlg look option, off by default
     VkbShader::Optimization::CollectShaderInfoPass(program, profile);
     VkbShader::IR::DumpProgram(program, info);
 

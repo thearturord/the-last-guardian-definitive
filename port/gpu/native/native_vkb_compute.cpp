@@ -32,6 +32,7 @@
 #include <nlohmann/json.hpp>
 
 #include "common/logging/log.h"
+#include "tlg_settings.h"
 #include "native/shadps4/core/guest_heap.h"
 #include "native/native_dispatch_inputs.h"
 #include "native/native_draw.h"
@@ -729,6 +730,7 @@ void Record(u64 ctx, u64 shader, Variant& v, u32 x, u32 y, u32 z, u64 indirect_a
     const u64 t0 = DispatchTimesOn() ? NowNs() : 0; // note 60: no clock reads per dispatch with the timers off
     const u64 alignment = instance->StorageMinAlignment();
     VkbShader::PushData push{};
+    TlgSettings::LeafAoLive(push.xoffset, push.yoffset); // the leaf ambient occlusion pass reads them (PushData::LeafAoStrengthIndex/RadiusIndex)
     boost::container::small_vector<vk::DescriptorBufferInfo, 16> buffer_infos;
     boost::container::small_vector<vk::DescriptorImageInfo, 16> image_infos;
     boost::container::small_vector<vk::WriteDescriptorSet, 32> writes;

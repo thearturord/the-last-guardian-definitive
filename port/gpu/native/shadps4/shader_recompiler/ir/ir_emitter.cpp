@@ -118,6 +118,10 @@ void IREmitter::DeviceMemoryBarrier() {
     Inst(Opcode::DeviceMemoryBarrier);
 }
 
+F32 IREmitter::TlgPushF32(u32 index) {
+    return Inst<F32>(Opcode::TlgPushF32, Imm32(index));
+}
+
 U32 IREmitter::GetUserData(IR::ScalarReg reg) {
     ASSERT(static_cast<u32>(reg) < IR::NumScalarRegs);
     return Inst<U32>(Opcode::GetUserData, reg);

@@ -394,6 +394,9 @@ using FMaskResourceList = boost::container::static_vector<FMaskResource, NUM_FMA
 struct PushData {
     static constexpr u32 XOffsetIndex = 0;
     static constexpr u32 YOffsetIndex = 1;
+    /// tlg: compute dispatches do not use the viewport offsets; they carry the live leaf ambient occlusion strength and radius (m)
+    static constexpr u32 LeafAoStrengthIndex = XOffsetIndex;
+    static constexpr u32 LeafAoRadiusIndex = YOffsetIndex;
     static constexpr u32 XScaleIndex = 2;
     static constexpr u32 YScaleIndex = 3;
     static constexpr u32 BufOffsetIndex = 4;

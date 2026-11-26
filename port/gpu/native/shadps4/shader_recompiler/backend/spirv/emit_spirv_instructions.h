@@ -47,6 +47,7 @@ void EmitBarrier(EmitContext& ctx);
 void EmitSubgroupBarrier(EmitContext& ctx);
 void EmitWorkgroupMemoryBarrier(EmitContext& ctx);
 void EmitDeviceMemoryBarrier(EmitContext& ctx);
+Id EmitTlgPushF32(EmitContext& ctx, u32 index);
 Id EmitGetUserData(EmitContext& ctx, IR::ScalarReg reg);
 void EmitGetThreadBitScalarReg(EmitContext& ctx);
 void EmitSetThreadBitScalarReg(EmitContext& ctx);

@@ -45,6 +45,8 @@ public:
     void Barrier();
     void WorkgroupMemoryBarrier();
     void DeviceMemoryBarrier();
+    /// tlg: the float at `index` of the push data block, as the dispatch set it
+    [[nodiscard]] F32 TlgPushF32(u32 index);
     void SubgroupBarrier();
 
     [[nodiscard]] U32 GetUserData(IR::ScalarReg reg);

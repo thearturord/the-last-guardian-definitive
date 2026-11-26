@@ -4,9 +4,11 @@
 // without its two old-path switches, indexed_resources and constant_offsets, since the backend binds every resource in its own set).
 #pragma once
 
+#include <algorithm>
 #include <cstdlib>
 
 #include "native/shadps4/shader_recompiler/profile.h"
+#include "tlg_settings.h"
 #include "native/shadps4/video_core/renderer_vulkan/vk_instance.h"
 
 namespace VideoCore::Vkb {
@@ -14,7 +16,7 @@ namespace VideoCore::Vkb {
 inline VkbShader::Profile ProfileFor(const VkbVulkan::Instance& instance) {
     const auto& vk12_props = instance.GetVk12Properties();
     const auto driver = instance.GetDriverID();
-    return VkbShader::Profile{
+    VkbShader::Profile profile{
         .max_viewport_width = instance.GetMaxViewportWidth(),
         .max_viewport_height = instance.GetMaxViewportHeight(),
         .max_shared_memory_size = instance.MaxComputeSharedMemorySize(),
@@ -61,6 +63,10 @@ inline VkbShader::Profile ProfileFor(const VkbVulkan::Instance& instance) {
         // feature. Read once at start; there is no translated-shader cache on disk, so nothing translated the other way is reused.
         .reads_out_of_branch = [] { const char* e = std::getenv("TLG_VKB_READS_OUT_OF_BRANCH"); return e == nullptr || e[0] != '0'; }(),
     };
+    // look option (Extras "Realistic tree shade", TLG_LEAF_AO), see leaf_ambient_occlusion_pass.cpp: the material entries are part of the translation,
+    // strength and radius are read live per dispatch (native_vkb_compute.cpp). Plain SPIR-V, no driver feature.
+    profile.leaf_ao_materials = TlgSettings::LeafAoMaterials();
+    return profile;
 }
 
 } // namespace VideoCore::Vkb

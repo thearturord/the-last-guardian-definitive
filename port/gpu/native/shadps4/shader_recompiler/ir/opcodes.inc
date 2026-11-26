@@ -60,6 +60,8 @@ OPCODE(SharedAtomicXor32,                                   U32,            U32,
 OPCODE(SharedAtomicXor64,                                   U64,            U32,            U64,                                                            )
 OPCODE(SharedAtomicCmpSwap32,                               U32,            U32,            U32,            U32,                                            )
 OPCODE(SharedAtomicCmpSwap64,                               U64,            U32,            U64,            U64,                                            )
+// tlg: a float of the push data block (leaf ambient occlusion: its live strength and radius)
+OPCODE(TlgPushF32,                                          F32,            U32,                                                                            )
 
 // Context getters/setters
 OPCODE(GetUserData,                                         U32,            ScalarReg,                                                                      )

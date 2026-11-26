@@ -4,8 +4,10 @@
 #include "native/vkb_core/vkb_device.h"
 
 #include <array>
+#include <cstdlib>
 #include <memory>
 #include "common/assert.h"
+#include "common/logging/log.h"
 #include "native/shadps4/video_core/renderer_vulkan/vk_host_import.h"
 #include "native/shadps4/video_core/renderer_vulkan/vk_instance.h"
 #include "native/shadps4/video_core/renderer_vulkan/vk_resource_pool.h"
@@ -36,6 +38,9 @@ void Init(const VkbVulkan::Instance& instance, VkbVulkan::Scheduler& scheduler) 
     g_scheduler = &scheduler;
     g_desc_heap = std::make_unique<VkbVulkan::DescriptorHeap>(instance, scheduler.GetMasterSemaphore(), DescriptorHeapSizes);
     g_profile = VideoCore::Vkb::ProfileFor(instance);
+    if (const char* e = std::getenv("TLG_VKB_LEAF_AO"); e != nullptr && *e != 0) { // the old switch of this look option
+        LOG_WARNING(Render_Vulkan, "TLG_VKB_LEAF_AO={} is not read any more: use TLG_LEAF_AO (same form) or the Extras setting Realistic tree shade", e);
+    }
     VkbVulkan::GpuPool::Setup(instance); // before the game has memory: the guest pool may become our memory (TLG_VKB_GPU_POOL)
 }
 

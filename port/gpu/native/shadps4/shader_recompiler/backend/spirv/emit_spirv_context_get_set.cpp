@@ -17,6 +17,10 @@ namespace VkbShader::Backend::SPIRV {
 using PointerType = EmitContext::PointerType;
 using PointerSize = EmitContext::PointerSize;
 
+Id EmitTlgPushF32(EmitContext& ctx, u32 index) {
+    return ctx.OpLoad(ctx.F32[1], ctx.OpAccessChain(ctx.TypePointer(spv::StorageClass::PushConstant, ctx.F32[1]), ctx.push_data_block, ctx.ConstU32(index)));
+}
+
 static std::pair<Id, bool> OutputAttrComponentType(EmitContext& ctx, IR::Attribute attr) {
     if (IR::IsParam(attr)) {
         const u32 index{u32(attr) - u32(IR::Attribute::Param0)};
