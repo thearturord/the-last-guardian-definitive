@@ -54,6 +54,14 @@ struct Job {
     u32 weight{1}; ///< G2: the jobs it stands for in the submission split (a batch: its draws)
     bool splice{false}; ///< P1 (parallel passes): a Splice placeholder (the resolver waits for its jobs and handles them in its place)
     std::vector<Transition> transitions;
+    /// issue 111: buffer copies its Prepare asked for (CopyInStream): recorded in the stream in front of the job
+    struct Copy {
+        vk::Buffer source{}; ///< none: the destination is filled with zeros
+        u64 source_offset{};
+        vk::Buffer destination{};
+        u64 bytes{};
+    };
+    std::vector<Copy> copies_first;
     std::atomic<Job*> queue_next{nullptr}; ///< note 60: the lock-free hand-over queue's link
 };
 /// A2 (note 46; TLG_VKB_JOB_POOL, default on, =0 off): the memory of jobs of one size is reused (a job is made on the engine's thread and freed on the recording thread,
@@ -141,6 +149,31 @@ void Defer(Work work, F&& f) {
     job->work = work;
     Enqueue(std::move(job));
 }
+/// Issue 111: a job with its own Prepare (run in stream order on the resolver, R4a; not run with the single recorder or without the recording thread)
+template <class P, class F>
+struct FnPrepJob final : Job {
+    FnPrepJob(P&& p_, F&& f_) : p(std::move(p_)), f(std::move(f_)) {}
+    static void* operator new(size_t) {
+        return JobBlocks<sizeof(FnPrepJob)>::Get();
+    }
+    static void operator delete(void* ptr) {
+        JobBlocks<sizeof(FnPrepJob)>::Put(ptr);
+    }
+    void Prepare() override {
+        p();
+    }
+    void Run(vk::CommandBuffer cmd) override {
+        f(cmd);
+    }
+    P p;
+    F f;
+};
+template <class P, class F>
+void DeferPrepared(Work work, P&& prepare, F&& f) {
+    auto job = std::make_unique<FnPrepJob<std::decay_t<P>, std::decay_t<F>>>(std::decay_t<P>(std::forward<P>(prepare)), std::decay_t<F>(std::forward<F>(f)));
+    job->work = work;
+    Enqueue(std::move(job));
+}
 /// R4a: a job that begins (+1) or ends (-1) an occlusion query
 template <class F>
 void DeferQuery(s8 query, F&& f) {
@@ -155,6 +188,10 @@ void DeferUnlocked(F&& f) {
     job->locked = false;
     Enqueue(std::move(job));
 }
+/// Issue 111: a buffer copy that must run in the stream in front of the job being resolved or recorded on our recording side now (a buffer's device copy made at
+/// a first bind found there): from a job's Prepare (the resolver) it goes with that job, from a job's Run it is recorded at once. `source` none: zeros.
+/// Elsewhere (not on the recording side) it is a job of its own (Defer).
+void CopyInStream(vk::Buffer source, u64 source_offset, vk::Buffer destination, u64 bytes);
 /// V4h (TLG_VKB_STAGE=1): a range of engine memory a command reads in place (guest memory over the bus) is copied, once per submission, into our device ring by a command
 /// buffer that runs in front of the submission's; `buffer` / `offset` then name the copy. Not for a range our GPU work wrote earlier in the same submission. Lock held (a job).
 /// False: left in place.

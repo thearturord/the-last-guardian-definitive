@@ -703,6 +703,7 @@ struct Watched {
     u64 first_bind_submit{}; ///< the graphics submit of its first bind (0: never bound)
     u32 changes_after_bind{};
     u32 settle_changes{}; ///< V4j: changes seen while settling (more than SettleGiveUp: in place for good)
+    bool copy_pending{}; ///< issue 111: its first-bind copy is a job made on the engine's thread that our recording side has not run yet
     // V4e (mode 2): its own device copy once its memory has been unchanged for SettleSubmits graphics submits after its first bind
     enum class State : u8 { InPlace, Device, Unstable } state{State::InPlace};
     u64 last_change_submit{}; ///< the submit its memory last changed (or its first bind)
@@ -818,6 +819,15 @@ std::atomic<u64> c_static_at_bind{0}, c_static_at_bind_mb{0}, c_static_at_bind_f
 /// engine memory after the copy (a CPU write the engine makes without UpdateSubresource) is logged with the buffer and sends it back in place
 /// debug: TLG_VKB_R3D_SKIP=<bytes>,<bytes>,... buffers of those sizes never get a first-bind copy (they settle by hash as with =0); TLG_VKB_R3D_LOG=<file>
 /// writes one line per first-bind copy: graphics submit, address, bytes, usage, bind, cpu access
+/// Issue 111 (TLG_VKB_FIRST_BIND_RECORDER, default on; =0 LEGACY(vkb_first_bind_recorder): such a bind settles by hash, read in place and staged per submission for
+/// 10 submits or more): a first bind found on our recording side (a draw's late buffers) makes the device copy as one found on the engine's thread does; the copy is
+/// recorded in the stream in front of the draw that binds it (Stream::CopyInStream). A device copy made on the engine's thread is bound on the recording side only
+/// once its copy job has run there (draws before it in the stream read in place).
+bool FirstBindOnRecorderOn() {
+    static const bool on = [] { const char* e = std::getenv("TLG_VKB_FIRST_BIND_RECORDER"); return e == nullptr || e[0] != '0'; }();
+    return on;
+}
+std::atomic<u64> c_fbr_copies{0}, c_fbr_mb{0}, c_fbr_pending_in_place{0};
 bool R3dSkipped(u64 bytes) {
     static const std::vector<u64> sizes = [] {
         std::vector<u64> out;
@@ -891,11 +901,25 @@ VkBuffer MakeDeviceBuffer(u64 bytes, VmaAllocation& allocation) {
     return handle;
 }
 
+/// issue 111: the resolver has reached the first-bind copy job of the buffer at `address` (its Prepare, no stream lock; or its Run: the stream lock, then this
+/// module's lock): from here on in the stream its device copy holds the data, so binds found on the recording side may take it
+void CopyJobReached(u64 address, VkBuffer device) {
+    if (!FirstBindOnRecorderOn()) {
+        return;
+    }
+    std::scoped_lock lock{mutex};
+    if (const auto it = watched.find(address); it != watched.end() && it->second.device == device && it->second.copy_pending) {
+        it->second.copy_pending = false;
+        BumpBufferEpoch(); // note 46: A1 memo answers may change (an in-place answer of the recording side)
+    }
+}
+
 /// A window without the stream lock order problem: called with the stream recording held (stream lock, then this module's lock)
 bool FindLocked(u64 address, u64 size, BufferWindow& out) {
     struct InitialCopy {
         u64 address{}, bytes{};
         VkBuffer device{};
+        bool on_recorder{}; ///< issue 111: found on our recording side: the copy goes in front of the draw (Stream::CopyInStream)
     } initial;
     if (InVramRing(address, size, out)) {
         c_ring_vram_binds.fetch_add(1, std::memory_order_relaxed);
@@ -931,8 +955,9 @@ bool FindLocked(u64 address, u64 size, BufferWindow& out) {
                     if (R3dTraceBytes() != 0 && wb.end - it->first == R3dTraceBytes()) {
                         R3dTracePath(it->first, wb.first_bind_submit == 0 ? "first" : wb.state == Watched::State::Device ? (now >= wb.ready_submit ? "device" : "device not ready") : wb.state == Watched::State::Unstable ? "unstable" : "settling", address, size, now);
                     }
-                    if (wb.first_bind_submit == 0 && StaticAtBindOn() && !wb.gpu_written && !(Stream::OnRecorder() && Stream::RecorderOn()) &&
-                        !R3dSkipped(wb.end - it->first)) {
+                    const bool on_recorder = Stream::OnRecorder() && Stream::RecorderOn();
+                    const bool fbr = FirstBindOnRecorderOn();
+                    if (wb.first_bind_submit == 0 && StaticAtBindOn() && !wb.gpu_written && (!on_recorder || fbr) && !R3dSkipped(wb.end - it->first)) {
                         // R3d: its device copy now; the copy job goes into the stream below, after the lock, in front of the job of this bind
                         wb.first_bind_submit = now + 1;
                         const u64 bytes = wb.end - it->first;
@@ -953,8 +978,9 @@ bool FindLocked(u64 address, u64 size, BufferWindow& out) {
                             wb.state = Watched::State::Device;
                             BumpBufferEpoch(); // note 46: A1 memo answers may change
                             static const bool via_batch = [] { const char* e = std::getenv("TLG_VKB_R3D_VIA_BATCH"); return e != nullptr && e[0] == '1'; }(); // (=2: bound at once)
-                            wb.ready_submit = R3dFirstInPlace() || via_batch ? now + 2 : 0;
-                            initial = {it->first, bytes, wb.device};
+                            wb.ready_submit = !on_recorder && (R3dFirstInPlace() || via_batch) ? now + 2 : 0; // (the test modes: the engine's thread only)
+                            initial = {it->first, bytes, wb.device, on_recorder};
+                            wb.copy_pending = fbr && !on_recorder && !via_batch; // issue 111: until its copy job runs on the recording side (test mode via the batch: none)
                             out = {vk::Buffer{wb.device}, address - it->first, true};
                             c_static_at_bind.fetch_add(1, std::memory_order_relaxed);
                             c_static_at_bind_mb.fetch_add(bytes, std::memory_order_relaxed);
@@ -964,6 +990,8 @@ bool FindLocked(u64 address, u64 size, BufferWindow& out) {
                         wb.first_bind_submit = now + 1;
                         wb.last_change_submit = now;
                         settling.push_back(it->first);
+                    } else if (wb.state == Watched::State::Device && wb.copy_pending && on_recorder) {
+                        c_fbr_pending_in_place.fetch_add(1, std::memory_order_relaxed); // issue 111: a draw before its copy job in the stream: in place (below)
                     } else if (wb.state == Watched::State::Device && now >= wb.ready_submit) {
                         out = {vk::Buffer{wb.device}, address - it->first, true};
                         c_dev2_binds.fetch_add(1, std::memory_order_relaxed);
@@ -984,6 +1012,14 @@ bool FindLocked(u64 address, u64 size, BufferWindow& out) {
         }
         const VkBuffer device = initial.device;
         const u64 bytes = initial.bytes;
+        if (initial.on_recorder) {
+            // issue 111: in the stream in front of the draw whose lookup this is (its Prepare on the resolver, or its Run on the single recorder)
+            Stream::NoteBytes(Stream::Work::Upload, bytes);
+            Stream::CopyInStream(src.buffer, src.offset, vk::Buffer{device}, bytes);
+            c_fbr_copies.fetch_add(1, std::memory_order_relaxed);
+            c_fbr_mb.fetch_add(bytes, std::memory_order_relaxed);
+            return true;
+        }
         // test: TLG_VKB_R3D_VIA_BATCH=1: the copy in the upload batch (as settling), this bind and the next ones until ready_submit read in place; =2: the copy in the
         // upload batch (in front of this submission), the device copy bound at once
         static const char via_batch = [] { const char* e = std::getenv("TLG_VKB_R3D_VIA_BATCH"); return e != nullptr ? e[0] : '0'; }();
@@ -1008,7 +1044,10 @@ bool FindLocked(u64 address, u64 size, BufferWindow& out) {
                 std::fclose(f);
             }
         }
-        Stream::Defer(Stream::Work::Upload, [src, device, bytes, dump, dump_address, dump_submit](vk::CommandBuffer cmd) {
+        // issue 111: the resolver reaches it in stream order (Prepare; with the single recorder its Run): binds found on the recording side may take the copy from there on
+        Stream::DeferPrepared(Stream::Work::Upload, [dump_address, device] { CopyJobReached(dump_address, device); },
+                              [src, device, bytes, dump, dump_address, dump_submit](vk::CommandBuffer cmd) {
+            CopyJobReached(dump_address, device);
             if (src.buffer) {
                 Stream::Hazard(cmd, {Stream::BufferUse(src.buffer, src.offset, bytes, false), Stream::BufferUse(vk::Buffer{device}, 0, bytes, true)});
                 cmd.copyBuffer(src.buffer, vk::Buffer{device}, vk::BufferCopy{src.offset, 0, bytes});
@@ -4798,7 +4837,9 @@ nlohmann::json ObjectsReport() {
                           {"staging_textures", {{"note", "note 42: copies into staging textures written back for the CPU's Map(READ)"}, {"copies", c_staging_copies.load()},
                                                 {"reads", c_staging_reads.load()}, {"not_ready", c_staging_unready.load()}, {"older", c_staging_older.load()}, {"unhandled", c_staging_unhandled.load()}, {"retired_with_texture", c_staging_retired.load()}}},
                           {"static_at_first_bind", {{"on", StaticAtBindOn()}, {"made", c_static_at_bind.load()}, {"zero_filled_no_source", c_static_at_bind_zero.load()}, {"mb", c_static_at_bind_mb.load() >> 20},
-                                                    {"failed", c_static_at_bind_failed.load()}}},
+                                                    {"failed", c_static_at_bind_failed.load()},
+                                                    {"found_on_recording_side", {{"on", FirstBindOnRecorderOn()}, {"made", c_fbr_copies.load()}, {"mb", c_fbr_mb.load() >> 20},
+                                                                                 {"read_in_place_before_copy_job", c_fbr_pending_in_place.load()}}}}},
                           {"dynamic_device_buffers", {{"on", DynamicDeviceOn()}, {"made", c_dyn_device.load()}, {"unmap_uploads", c_dyn_unmaps.load()},
                                                       {"unmap_upload_mb", c_dyn_unmap_mb.load() >> 20}, {"checks", c_dyn_checks.load()},
                                                       {"changed_between_unmap_and_next_map", c_dyn_changed_outside.load()}}},
