@@ -619,7 +619,10 @@ void InstallSpans(VAddr base, u64 image_size) {
         for (const auto& item : config.at("spans")) {
             const auto name = item.at("name").get<std::string>();
             const u64 slot_offset = ParseHex(item.at("slot")) - ghidra_base;
-            const u64 target_offset = ParseHex(item.at("target")) - ghidra_base;
+            // "target": "auto" takes the function the slot holds now (it must point into the image): spans generated from vtables found at run time
+            const bool auto_target = item.at("target").is_string() && item.at("target").get<std::string>() == "auto";
+            const u64 target_offset = auto_target ? (slot_offset + 8 <= image_size ? *reinterpret_cast<const u64*>(base + slot_offset) - base : ~0ull)
+                                                  : ParseHex(item.at("target")) - ghidra_base;
             if (slot_offset + 8 > image_size || target_offset >= image_size) {
                 TLG_LOG(HOOK, Error, "frame profiler span '{}': outside the image", name);
                 continue;

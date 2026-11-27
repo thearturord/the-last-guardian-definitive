@@ -7349,7 +7349,26 @@ u64 PS4_SYSV_ABI SchedDispatch(u64 node, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5,
     const u32 state = *reinterpret_cast<const volatile u32*>(node + 0x80);
     const u32 pending = *reinterpret_cast<const volatile u32*>(node + 0x78);
     const u32 flags = *reinterpret_cast<const volatile u32*>(node + 0x84);
-    FrameTimeline::Record(FrameTimeline::SchedNode, node, FrameTimeline::Now(), 2 | (u64{state} << 8) | (u64{pending} << 16) | (u64{flags} << 32));
+    const u64 now = FrameTimeline::Now();
+    FrameTimeline::Record(FrameTimeline::SchedNode, node, now, 2 | (u64{state} << 8) | (u64{pending} << 16) | (u64{flags} << 32));
+    // the node is the task object: kind 3 = its vtable (Ghidra address) << 8, then kind 4 = each dependency node with its vtable << 8 (fix A cost trace, 2026-11-27)
+    const u64 base = ImageBase();
+    const auto vtable_of = [base](u64 object) -> u64 {
+        if (!IsHeapPointer(object) || (object & 7) != 0) {
+            return 0;
+        }
+        const u64 vt = *reinterpret_cast<const volatile u64*>(object);
+        return vt >= base && vt < base + 0x4000000 ? vt - base + 0x1000000 : 0;
+    };
+    FrameTimeline::Record(FrameTimeline::SchedNode, node, now, 3 | (vtable_of(node) << 8));
+    const u64 deps = *reinterpret_cast<const volatile u64*>(node + 0x40);
+    const u32 count = *reinterpret_cast<const volatile u32*>(node + 0x48);
+    for (u32 i = 0; IsHeapPointer(deps) && i < count && i < 64; ++i) {
+        const u64 dep = *reinterpret_cast<const volatile u64*>(deps + 8ull * i);
+        if (dep != 0) {
+            FrameTimeline::Record(FrameTimeline::SchedNode, dep, now, 4 | (vtable_of(dep) << 8));
+        }
+    }
     return 0;
 }
 
@@ -9375,6 +9394,24 @@ void Post() {
 }
 } // namespace SchedulerWake
 
+/// When the next AnimationTick becomes ready (debug, TLG_VKB_TASK_READY_CENSUS=1, fix A cost): the task manager's enqueue (01e4ac30, K2_Enqueue) of the
+/// AnimationTick task object (vtable 026e9080, execute +0x28 = 01d0ded0) against its start (K2_AnimationTick) and against the start of fix A's wait. Each such
+/// enqueue is also written to a timeline capture as a zero-length guest span (id 900) on the enqueuing thread, and its call chain is counted. The first
+/// 200,000 enqueues are counted by the object's vtable (do tasks pass through this enqueue at all).
+namespace TaskReady {
+bool On() {
+    static const bool on = [] { const char* e = std::getenv("TLG_VKB_TASK_READY_CENSUS"); return e != nullptr && e[0] == '1'; }();
+    return on;
+}
+constexpr u64 AnimationTickVtable = 0x26e9080;
+std::atomic<u64> wait_start_ns{0}; ///< FrameTimeline clock: fix A's current wait started (0: none)
+std::atomic<u64> last_enqueue_ns{0};
+std::mutex mutex;
+std::map<u64, u64> by_vtable;            ///< (mutex)
+std::map<std::string, u64> chains;       ///< (mutex)
+u64 enqueues = 0, starts = 0, starts_in_wait = 0, sum_enqueue_to_start = 0, sum_wait_to_enqueue = 0, sum_wait_to_start = 0, enqueued_before_wait = 0; ///< (mutex)
+} // namespace TaskReady
+
 namespace AnimQueryOrder {
 /// Fix A (2026-11-19): the recording waits for the next AnimationTick's unlocked query producers. Default again since 2026-11-23: QueryCarry (fix B, below), which
 /// kept the late groups for the next recording instead of waiting, is the lead for a soldier pushed against the camera flickering (issue 1), so it is off until it
@@ -9507,6 +9544,9 @@ void BeforeRecording() {
         return;
     }
     const auto t0 = std::chrono::steady_clock::now();
+    if (TaskReady::On()) {
+        TaskReady::wait_start_ns.store(Core::FrameTimeline::Now(), std::memory_order_relaxed);
+    }
     if (TimesOn()) {
         window = {};
         window.active = true;
@@ -9540,6 +9580,9 @@ void BeforeRecording() {
     }
     c_waits.fetch_add(1, std::memory_order_relaxed);
     c_waited_us.fetch_add(static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count()), std::memory_order_relaxed);
+    if (TaskReady::On()) {
+        TaskReady::wait_start_ns.store(0, std::memory_order_relaxed);
+    }
     if (TimesOn() && window.active) {
         const auto wake = Clock::now();
         const auto tick = window.tick_seen ? std::max(window.tick, t0) : wake;
@@ -9886,6 +9929,54 @@ u64 PS4_SYSV_ABI WaitRenderChain(Core::GuestHooks::MidContext* c) {
 
 /// Mid hook at the entry of the task manager's enqueue (01e4ac30, vtable 026ebcc0 + 0x70): who enqueues a CharacterAnimationExt job (debug, K2 census)
 u64 PS4_SYSV_ABI K2Enqueue(Core::GuestHooks::MidContext* c) {
+    if (TaskReady::On() && IsHeapPointer(c->rsi)) {
+        Guarded([&]() -> u64 {
+            const u64 base = ImageBase();
+            const auto ghidra = [&](u64 a) { return a >= base && a < base + 0x4000000 ? a - base + 0x1000000 : 0; };
+            // the enqueued object is a job (+ 8 its callback): it runs AnimationTick when one of its words points at the AnimationTick task object
+            const u64 vt = ghidra(Rd<u64>(c->rsi, 8));
+            bool tick = false;
+            for (u64 o = 0x10; o <= 0x80 && !tick; o += 8) {
+                const u64 p = Rd<u64>(c->rsi, o);
+                tick = IsHeapPointer(p) && (p & 7) == 0 && ghidra(Rd<u64>(p, 0)) == TaskReady::AnimationTickVtable;
+            }
+            std::string chain;
+            if (tick) {
+                const u64 now = Core::FrameTimeline::Now();
+                TaskReady::last_enqueue_ns.store(now, std::memory_order_relaxed);
+                Core::FrameTimeline::Record(Core::FrameTimeline::GuestSpan, 900ull << 48, now, now); // "AnimationTick enqueued" on this thread
+                chain = fmt::format("{:#x}", ghidra(Rd<u64>(c->rsp, 0)));
+                u64 rbp = c->rbp;
+                for (u32 i = 0; i < 10 && rbp >= c->rsp && rbp < c->rsp + (4ull << 20) && (rbp & 7) == 0; ++i) {
+                    const u64 ra = Rd<u64>(rbp, 8);
+                    if (ra < base || ra > base + 0x4000000) {
+                        break;
+                    }
+                    chain += fmt::format(" < {:#x}", ghidra(ra));
+                    rbp = Rd<u64>(rbp, 0);
+                }
+            }
+            std::scoped_lock lock{TaskReady::mutex};
+            static u64 total = 0;
+            if (++total <= 200000) {
+                ++TaskReady::by_vtable[vt];
+                if (total == 200000) {
+                    std::vector<std::pair<u64, u64>> v(TaskReady::by_vtable.begin(), TaskReady::by_vtable.end());
+                    std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+                    std::string out;
+                    for (size_t i = 0; i < v.size() && i < 25; ++i) {
+                        out += fmt::format(" [callback {:#x} x{}]", v[i].first, v[i].second);
+                    }
+                    TLG_LOG(CP, Warn, "task ready census: the first 200000 enqueues by job callback ({} kinds):{}", v.size(), out);
+                }
+            }
+            if (tick) {
+                ++TaskReady::enqueues;
+                ++TaskReady::chains[chain + fmt::format(" (thread {})", GetCurrentThreadId())];
+            }
+            return 0;
+        });
+    }
     if (!K2Census::On() || !IsHeapPointer(c->rsi) || Rd<u64>(c->rsi, 0) - ImageBase() + 0x1000000 != 0x26d54b8) {
         return 0;
     }
@@ -9915,6 +10006,39 @@ u64 PS4_SYSV_ABI K2Enqueue(Core::GuestHooks::MidContext* c) {
 /// Call hook at AnimationTick's execute (01d0ded0): marks its start for the K2 census (debug)
 u64 PS4_SYSV_ABI K2AnimationTick(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 ret) {
     (void)a0, (void)a1, (void)a2, (void)a3, (void)a4, (void)a5, (void)ret;
+    if (TaskReady::On()) {
+        const u64 start = Core::FrameTimeline::Now();
+        const u64 enq = TaskReady::last_enqueue_ns.load(std::memory_order_relaxed);
+        const u64 wait = TaskReady::wait_start_ns.load(std::memory_order_relaxed);
+        std::scoped_lock lock{TaskReady::mutex};
+        ++TaskReady::starts;
+        if (enq != 0 && start >= enq) {
+            TaskReady::sum_enqueue_to_start += start - enq;
+        }
+        if (wait != 0 && start >= wait) {
+            ++TaskReady::starts_in_wait;
+            TaskReady::sum_wait_to_start += start - wait;
+            if (enq >= wait) {
+                TaskReady::sum_wait_to_enqueue += enq - wait;
+            } else {
+                ++TaskReady::enqueued_before_wait;
+            }
+        }
+        if (TaskReady::starts % 600 == 0) {
+            const double n = static_cast<double>(TaskReady::starts), w = std::max<double>(1.0, static_cast<double>(TaskReady::starts_in_wait));
+            std::string top;
+            std::vector<std::pair<std::string, u64>> v(TaskReady::chains.begin(), TaskReady::chains.end());
+            std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+            for (size_t i = 0; i < v.size() && i < 6; ++i) {
+                top += fmt::format("\n   [{}] {}", v[i].second, v[i].first);
+            }
+            TLG_LOG(CP, Warn,
+                    "task ready census: {} AnimationTick starts, {} enqueues; mean enqueue -> start {:.0f} us; during fix A's wait ({} starts): wait start -> start {:.0f} us = "
+                    "wait start -> enqueue {:.0f} us (enqueued before the wait began: {}) + the rest; enqueue chains:{}",
+                    TaskReady::starts, TaskReady::enqueues, TaskReady::sum_enqueue_to_start / n / 1000.0, TaskReady::starts_in_wait,
+                    TaskReady::sum_wait_to_start / w / 1000.0, TaskReady::sum_wait_to_enqueue / w / 1000.0, TaskReady::enqueued_before_wait, top);
+        }
+    }
     if (AnimQueryOrder::On()) {
         AnimQueryOrder::AnimationTickStarted();
     }
