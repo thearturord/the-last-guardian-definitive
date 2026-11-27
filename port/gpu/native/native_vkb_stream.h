@@ -132,7 +132,21 @@ struct Splice final : Job {
     std::atomic<u32> pushed{0};             ///< jobs appended so far (+ (1 << 31) once closed); the resolver waits on it
     std::atomic<u32> closed{0};
     std::atomic<u32> refs{2}; ///< the resolver and the filling thread: the last one done deletes it
+    u64 open_serial{};        ///< OrderSerial() when the engine's thread put it into the stream (move census)
 };
+/// Issue 130 (api-contract.md W5, 2026-11-27): the engine's heap mover (GpuHeap_MoveOneResource / GpuHeap_DropTopMipsOverBudget, on a game worker) copies a resource
+/// to new memory and swaps the engine's pointers only once the copy has run on the GPU (on the PS4 the async copy runs ahead of the frame's graphics work). A pass drawn
+/// on one of our workers sits in the stream at its placeholder but reads the engine's pointers later, so a draw made after the swap must find the copy done in front
+/// of it: while the mover runs, each job it makes goes into the oldest placeholder not yet closed (behind the draws already in it, ahead of every later one), or into
+/// the stream when none is open. Nothing waits (a placeholder closing first is skipped). TLG_LEGACY_MOVER_IN_STREAM=1: always the stream (the old order).
+bool MoverSinkBegin();
+void MoverSinkEnd(bool begun);
+bool MoverIntoSplice(); ///< (move census) this thread runs the mover and a placeholder is open
+/// Move census (debug, TLG_VKB_MOVE_CENSUS): a serial that orders stream events across threads; the placeholder this thread fills (its open serial, 0: none);
+/// placeholders not yet closed
+u64 OrderSerial();
+u64 SinkOpenSerial();
+u32 OpenSplices();
 /// The engine's thread: a new placeholder, enqueued now (the caller's open batch goes first). The pointer stays valid until Close.
 Splice* OpenSplice();
 /// The filling thread: its jobs go into `splice` (nullptr: into the stream again)

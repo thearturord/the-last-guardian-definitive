@@ -1753,9 +1753,62 @@ void Enqueue(std::unique_ptr<Job> job) {
     EnqueueImpl(std::move(job));
     c_enqueue_ns.fetch_add(RecNs() - e0, std::memory_order_relaxed);
 }
+std::atomic<u64> g_order_serial{1};
+std::atomic<u32> g_open_splices{0};
+u64 OrderSerial() {
+    return g_order_serial.fetch_add(1, std::memory_order_acq_rel);
+}
+u64 SinkOpenSerial() {
+    return t_sink != nullptr ? t_sink->open_serial : 0;
+}
+u32 OpenSplices() {
+    return g_open_splices.load(std::memory_order_acquire);
+}
+std::mutex open_splices_mutex;
+std::vector<Splice*> open_splices; ///< (open_splices_mutex) placeholders not yet closed, in stream order
+thread_local bool t_mover = false; ///< issue 130: this thread runs the engine's heap mover
+std::atomic<u64> c_mover_into_splice{0}, c_mover_into_stream{0};
+bool MoverSinkBegin() {
+    static const bool legacy = [] { const char* e = std::getenv("TLG_LEGACY_MOVER_IN_STREAM"); return e != nullptr && e[0] == '1'; }();
+    if (legacy || t_sink != nullptr || t_mover) {
+        return false;
+    }
+    t_mover = true;
+    return true;
+}
+bool MoverIntoSplice() {
+    return t_mover && g_open_splices.load(std::memory_order_acquire) != 0;
+}
+void MoverSinkEnd(bool begun) {
+    if (begun) {
+        t_mover = false;
+    }
+}
+/// A heap mover job into the oldest placeholder still open (under the registry lock, so the placeholder cannot be freed meanwhile; under its own lock, so it is not
+/// closed meanwhile); false: none open
+bool PushToOldestSplice(std::unique_ptr<Job>& job) {
+    std::scoped_lock lock{open_splices_mutex};
+    for (Splice* s : open_splices) {
+        std::scoped_lock splice_lock{s->m};
+        if (s->closed.load(std::memory_order_acquire) != 0) {
+            continue;
+        }
+        s->jobs.push_back(std::move(job));
+        s->pushed.fetch_add(1, std::memory_order_acq_rel);
+        s->pushed.notify_all();
+        return true;
+    }
+    return false;
+}
 Splice* OpenSplice() {
     auto job = std::make_unique<Splice>();
     job->work = Work::Draw;
+    job->open_serial = OrderSerial();
+    g_open_splices.fetch_add(1, std::memory_order_acq_rel);
+    {
+        std::scoped_lock lock{open_splices_mutex};
+        open_splices.push_back(job.get());
+    }
     Splice* p = job.get();
     Enqueue(std::move(job));
     return p;
@@ -1764,8 +1817,16 @@ void SinkTo(Splice* splice) {
     t_sink = splice;
 }
 void CloseSplice(Splice* splice) {
-    splice->closed.store(1, std::memory_order_release);
-    splice->pushed.fetch_or(0x80000000u, std::memory_order_acq_rel);
+    {
+        std::scoped_lock lock{open_splices_mutex};
+        std::erase(open_splices, splice);
+    }
+    g_open_splices.fetch_sub(1, std::memory_order_acq_rel);
+    {
+        std::scoped_lock splice_lock{splice->m}; // (a heap mover job pushed under this lock is counted before the close)
+        splice->closed.store(1, std::memory_order_release);
+        splice->pushed.fetch_or(0x80000000u, std::memory_order_acq_rel);
+    }
     splice->pushed.notify_all();
     if (splice->refs.fetch_sub(1, std::memory_order_acq_rel) == 1) {
         delete splice;
@@ -1775,6 +1836,13 @@ void EnqueueImpl(std::unique_ptr<Job> job) {
     job->transitions.swap(pending_transitions);
     pending_transitions.clear();
     c_jobs.fetch_add(1, std::memory_order_relaxed);
+    if (t_mover) { // issue 130: the heap mover's copies ahead of every draw made after its swap
+        if (PushToOldestSplice(job)) {
+            c_mover_into_splice.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        c_mover_into_stream.fetch_add(1, std::memory_order_relaxed);
+    }
     if (t_sink != nullptr) { // P1: a pass made on another thread (P2: the resolver takes it now)
         {
             std::scoped_lock lock{t_sink->m};

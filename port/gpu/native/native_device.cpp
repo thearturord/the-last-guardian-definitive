@@ -32,6 +32,7 @@
 #include "native/native_invariant.h"
 #include "native/native_image_desc.h"
 #include "native/native_device.h"
+#include "native/native_vkb_stream.h"
 #include "native/native_debug_server.h"
 #include "native/native_vkb.h"
 #include "native/native_vkb_objects.h"
@@ -1328,7 +1329,9 @@ u64 PS4_SYSV_ABI MaterialPressureProbe(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u
     if (original == 0) {
         return 0;
     }
+    const bool sink = Core::Vkb::Stream::MoverSinkBegin(); // issue 130: its copies ahead of every draw made after its swap
     const u32 result = static_cast<u32>(reinterpret_cast<GuestFunction6>(original)(a0, a1, a2, a3, a4, a5));
+    Core::Vkb::Stream::MoverSinkEnd(sink);
     material_probe[0].fetch_add(1, std::memory_order_relaxed);
     material_probe[1].fetch_add(static_cast<u32>(a0) == 0 ? 1 : 0, std::memory_order_relaxed);
     material_probe[2].fetch_add(result != 0 ? 1 : 0, std::memory_order_relaxed);
@@ -1340,7 +1343,9 @@ u64 PS4_SYSV_ABI MaterialMoveProbe(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a
     if (original == 0) {
         return 0;
     }
+    const bool sink = Core::Vkb::Stream::MoverSinkBegin(); // issue 130: its copies ahead of every draw made after its swap
     const u32 result = static_cast<u32>(reinterpret_cast<GuestFunction6>(original)(a0, a1, a2, a3, a4, a5));
+    Core::Vkb::Stream::MoverSinkEnd(sink);
     material_probe[3].fetch_add(1, std::memory_order_relaxed);
     material_probe[4].fetch_add(result != 0 ? 1 : 0, std::memory_order_relaxed);
     return 0x8000000000000000ull | result;

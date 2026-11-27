@@ -2671,7 +2671,58 @@ nlohmann::json LookupReport() {
 }
 
 bool ViewForComputeLookup(u64 view_id, vk::ImageViewType want, vk::CommandBuffer cmd, vk::ImageView& out, vk::Image* image);
+/// Move census (debug, TLG_VKB_MOVE_CENSUS=1, issue 130 lead): the engine's heap mover copies a texture to new memory and swaps its pointers only once the copy has
+/// run (Scene_PrepareMaterial spins on the async label). Our copy is a job of the frame stream made at the move. A pass drawn on a worker sits in the stream at its
+/// placeholder but reads the engine's pointers later: a worker draw that binds a moved image whose copy came after its placeholder reads it before the copy.
+bool MoveCensusOn() {
+    static const bool on = [] { const char* e = std::getenv("TLG_VKB_MOVE_CENSUS"); return e != nullptr && e[0] == '1'; }();
+    return on;
+}
+std::mutex move_census_mutex;
+std::unordered_map<VkImage, u64> moved_image_serial; ///< (move_census_mutex) the destination image of a move -> the serial of its copy job
+std::atomic<u64> c_mc_moves{0}, c_mc_moves_open{0}, c_mc_worker_binds_moved{0}, c_mc_hazards{0}, c_mc_buffer_moves_in_stream_open{0};
+void MoveCensusLog() {
+    LOG_WARNING(Render_Vulkan, "move census: texture moves {} ({} while a worker pass was open), buffer moves in the stream while a worker pass was open {}; worker draws "
+            "binding a moved image {}, of them before its copy (copy after the placeholder) {}",
+            c_mc_moves.load(), c_mc_moves_open.load(), c_mc_buffer_moves_in_stream_open.load(), c_mc_worker_binds_moved.load(), c_mc_hazards.load());
+}
+void MoveCensusBind(vk::Image image, u64 view_id) {
+    const u64 open = Stream::SinkOpenSerial();
+    if (open == 0 || !image) {
+        return;
+    }
+    u64 serial = 0;
+    {
+        std::scoped_lock lock{move_census_mutex};
+        if (const auto it = moved_image_serial.find(static_cast<VkImage>(image)); it != moved_image_serial.end()) {
+            serial = it->second;
+        }
+    }
+    if (serial == 0) {
+        return;
+    }
+    c_mc_worker_binds_moved.fetch_add(1, std::memory_order_relaxed);
+    if (serial > open) {
+        const u64 n = c_mc_hazards.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 10 || (n & (n - 1)) == 0) {
+            LOG_WARNING(Render_Vulkan, "move census: worker draw binds view {:#x} of a moved image before its copy (placeholder serial {}, copy serial {})", view_id, open, serial);
+            MoveCensusLog();
+        }
+    }
+}
+bool ViewForComputeChecked(u64 view_id, vk::ImageViewType want, vk::CommandBuffer cmd, vk::ImageView& out, vk::Image* image);
 bool ViewForCompute(u64 view_id, vk::ImageViewType want, vk::CommandBuffer cmd, vk::ImageView& out, vk::Image* image) {
+    if (!MoveCensusOn()) {
+        return ViewForComputeChecked(view_id, want, cmd, out, image);
+    }
+    vk::Image local{};
+    const bool ok = ViewForComputeChecked(view_id, want, cmd, out, image != nullptr ? image : &local);
+    if (ok) {
+        MoveCensusBind(image != nullptr ? *image : local, view_id);
+    }
+    return ok;
+}
+bool ViewForComputeChecked(u64 view_id, vk::ImageViewType want, vk::CommandBuffer cmd, vk::ImageView& out, vk::Image* image) {
     const LookupTimer lookup_timer{0};
     if (ContractCensusOn()) { // api-contract.md C10 (debug): a shader reads a texture the target-7 mode drew into
         u64 texture = 0;
@@ -4302,6 +4353,17 @@ void TextureMoved(u64 new_id, u64 old_id, u32 first_mip) {
         cmd.copyImage(src, vk::ImageLayout::eGeneral, dst, vk::ImageLayout::eGeneral, regions);
     });
     c_moved_textures.fetch_add(1, std::memory_order_relaxed);
+    if (MoveCensusOn()) {
+        {
+            std::scoped_lock census_lock{move_census_mutex};
+            // a copy the heap mover put into the oldest open placeholder is ahead of every later draw (serial 1); else its place in the stream
+            moved_image_serial[static_cast<VkImage>(dst)] = Stream::MoverIntoSplice() ? 1 : Stream::OrderSerial();
+        }
+        c_mc_moves_open.fetch_add(Stream::OpenSplices() != 0 ? 1 : 0, std::memory_order_relaxed);
+        if (c_mc_moves.fetch_add(1, std::memory_order_relaxed) % 200 == 199) {
+            MoveCensusLog();
+        }
+    }
     if (ContractCensusOn()) {
         std::scoped_lock census_lock{contract_mutex};
         contract_copy_destinations.insert(new_id);
@@ -4353,6 +4415,9 @@ bool MoveBufferNow(u64 destination, u64 source, u64 bytes) {
     }
     if (gpu_side) {
         c_moves_in_stream.fetch_add(1, std::memory_order_relaxed);
+        if (MoveCensusOn() && Stream::OpenSplices() != 0) {
+            c_mc_buffer_moves_in_stream_open.fetch_add(1, std::memory_order_relaxed);
+        }
         return false;
     }
     std::memcpy(reinterpret_cast<void*>(destination), reinterpret_cast<const void*>(source), bytes);
