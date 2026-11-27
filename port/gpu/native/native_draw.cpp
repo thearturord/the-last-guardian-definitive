@@ -9398,21 +9398,69 @@ struct Ext {
 std::unordered_map<u64, Ext> exts; ///< by extension object (mutex)
 thread_local u64 t_ext = 0, t_ext_generation = 0;
 std::atomic<u64> c_waits{0}, c_waited_us{0}, c_timeouts{0}, c_no_wait{0};
+
+/// Fix A's wait in parts (debug, TLG_VKB_ANIM_WAIT_TIMES=1): for each recording that waits, from the wait's start (t0) to
+/// (1) the start of the AnimationTick it waits for (0 when it had already started), (2) the first start of a producer's job in it (queue),
+/// (3) the last producer job's end (run), (4) the wake. Producers: extensions that registered a query in the last generation (the soldiers).
+/// Also each producer job's own run time. Means logged every 600 waits.
+bool TimesOn() {
+    static const bool on = [] { const char* e = std::getenv("TLG_VKB_ANIM_WAIT_TIMES"); return e != nullptr && e[0] == '1'; }();
+    return on;
+}
+using Clock = std::chrono::steady_clock;
+struct WaitWindow {
+    bool active = false, tick_seen = false, start_seen = false, done_seen = false;
+    u64 target = 0;
+    Clock::time_point t0, tick, first_start, last_done;
+};
+WaitWindow window; ///< (mutex)
+struct WaitSums {
+    u64 n = 0, tick_before = 0, to_tick = 0, queue = 0, run = 0, tail = 0, total = 0, jobs = 0, job_us = 0, max_total = 0;
+};
+WaitSums sums;                                     ///< (mutex)
+std::unordered_map<u64, Clock::time_point> job_t0; ///< producer job start by extension (mutex)
+u64 Us(Clock::time_point a, Clock::time_point b) { // b - a, 0 when negative
+    return b > a ? static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(b - a).count()) : 0;
+}
+
 void AnimationTickStarted() {
     std::scoped_lock lock{mutex};
     ++generation;
+    if (window.active && !window.tick_seen && generation >= window.target) {
+        window.tick_seen = true;
+        window.tick = Clock::now();
+    }
 }
 void ExtJobStarted(u64 ext) {
     std::scoped_lock lock{mutex};
     t_ext = ext, t_ext_generation = generation;
     exts[ext].started_generation = generation;
     exts[ext].started_thread = static_cast<u32>(GetCurrentThreadId());
+    if (TimesOn()) {
+        const auto now = Clock::now();
+        job_t0[ext] = now;
+        if (window.active && !window.start_seen && generation == window.target && exts[ext].producer_generation + 1 >= window.target) {
+            window.start_seen = true;
+            window.first_start = now;
+        }
+    }
 }
 void ExtJobDone(u64 ext) {
     {
         std::scoped_lock lock{mutex};
         Ext& e = exts[ext];
         e.done_generation = std::max(e.done_generation, t_ext == ext ? t_ext_generation : generation);
+        if (TimesOn() && e.producer_generation + 4 >= generation) {
+            const auto now = Clock::now();
+            if (const auto it = job_t0.find(ext); it != job_t0.end()) {
+                ++sums.jobs;
+                sums.job_us += Us(it->second, now);
+            }
+            if (window.active && e.done_generation >= window.target && e.producer_generation + 1 >= window.target) {
+                window.done_seen = true;
+                window.last_done = now;
+            }
+        }
     }
     t_ext = 0;
     cv.notify_all();
@@ -9459,6 +9507,17 @@ void BeforeRecording() {
         return;
     }
     const auto t0 = std::chrono::steady_clock::now();
+    if (TimesOn()) {
+        window = {};
+        window.active = true;
+        window.target = target;
+        window.t0 = t0;
+        if (generation >= target) {
+            window.tick_seen = true;
+            window.tick = t0;
+            ++sums.tick_before;
+        }
+    }
     bool ok = false;
     if (SchedulerWake::On()) {
         // Issue 78: this worker waits for work of the game's next task cycle, but the game's scheduler counts it as busy and expects every busy
@@ -9481,6 +9540,32 @@ void BeforeRecording() {
     }
     c_waits.fetch_add(1, std::memory_order_relaxed);
     c_waited_us.fetch_add(static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count()), std::memory_order_relaxed);
+    if (TimesOn() && window.active) {
+        const auto wake = Clock::now();
+        const auto tick = window.tick_seen ? std::max(window.tick, t0) : wake;
+        ++sums.n;
+        sums.to_tick += Us(t0, tick);
+        if (window.start_seen) {
+            sums.queue += Us(tick, window.first_start);
+        }
+        if (window.start_seen && window.done_seen) {
+            sums.run += Us(std::max(window.first_start, tick), window.last_done);
+            sums.tail += Us(window.last_done, wake);
+        }
+        const u64 total = Us(t0, wake);
+        sums.total += total;
+        sums.max_total = std::max(sums.max_total, total);
+        window.active = false;
+        if (sums.n % 600 == 0) {
+            const double n = static_cast<double>(sums.n);
+            TLG_LOG(CP, Warn,
+                    "anim wait times: {} waits (next AnimationTick already started at the wait: {}), mean us: wait {:.0f} (max {}) = until AnimationTick starts {:.0f} + "
+                    "until a soldier job starts {:.0f} + soldier jobs running {:.0f} + after the last job {:.0f}; soldier job run time mean {:.0f} us ({} jobs); "
+                    "recordings without a wait {}",
+                    sums.n, sums.tick_before, sums.total / n, sums.max_total, sums.to_tick / n, sums.queue / n, sums.run / n, sums.tail / n,
+                    sums.jobs != 0 ? static_cast<double>(sums.job_us) / static_cast<double>(sums.jobs) : 0.0, sums.jobs, c_no_wait.load());
+        }
+    }
     if (!ok) {
         if (c_timeouts.fetch_add(1, std::memory_order_relaxed) < 12) {
             std::string pending;
