@@ -1953,10 +1953,10 @@ bool JoinBatch(DrawJob& job);
 thread_local u64 t_join_dsv = 0, t_join_rtv0 = 0; ///< R7 step C: the engine views of the draw joining (set by Record)
 thread_local u64 t_join_rtvs = 0; ///< G2: all colour targets of the draw joining
 /// G2 (TLG_VKB_RECORD_ALL, with TLG_VKB_RECORD): record mode, batches and the lean path for the indexed draws of every pass, not only the shadow cascades.
-/// OFF by default since 2026-11-23 (tabnul issue 130: the coloured glass of the eye sign in s07 AL_a01_SkyAthletics_01 is lost when its draw joins a batch of colour
-/// draws; right with TLG_VKB_RECORD_BATCH=0). TLG_VKB_RECORD_ALL=1 turns it on until the batch keeps what that draw needs. TLG_VKB_RECORD (the cascades) stays on.
+/// Default again since 2026-11-27 (off 2026-11-23..27 for tabnul issue 130: the coloured glass of the eye sign in s07 AL_a01_SkyAthletics_01 was lost in a batch;
+/// fixed in PR 14: batched draws use VulkanFirstVertex). TLG_VKB_RECORD_ALL=0 turns it off. TLG_VKB_RECORD (the cascades) stays on.
 bool RecordAll() {
-    static const bool on = [] { const char* e = std::getenv("TLG_VKB_RECORD_ALL"); return e != nullptr && e[0] == '1'; }();
+    static const bool on = [] { const char* e = std::getenv("TLG_VKB_RECORD_ALL"); return e == nullptr || e[0] != '0'; }();
     return on;
 }
 inline u64 RtvHash(u64 ctx) {

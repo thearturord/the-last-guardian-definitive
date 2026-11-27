@@ -21,10 +21,11 @@
 /// Open backend switch (2026-11-18, api-contract.md K1): TLG_LEGACY_LABEL_UNITS=1 lets an older compute submit unit's end records write a shared label after a newer submit.
 /// Deleted 2026-11-19 (api-contract.md K2): the AABB reader guard (TLG_LEGACY_AABB_GUARD) and the pass flags (TLG_READBACK_PASS_FLAGS): fix A (AnimQueryOrder, default)
 /// removed the soldiers' late readback queries behind the crash after the shield flashback.
-/// 2026-11-23: three speed changes of 2026-11-21 are OFF by default until they are reimplemented (each is the lead for an open picture bug):
-///   TLG_VKB_PAR_GBUFFER=1  the G-buffer passes on the workers (issue 130: black floors / rooms)
-///   TLG_VKB_RECORD_ALL=1   record mode and batches for every pass (issue 130: the coloured glass lost in a batch)
-///   TLG_VKB_QUERY_CARRY=1  K2 fix B, late query groups carried to the next recording (issue 1: the light patch on headless guards)
+/// 2026-11-23: three speed changes of 2026-11-21 were turned OFF (each the lead for an open picture bug). Two are default again since 2026-11-27 (issue 130 fixed:
+/// PR 14 + 98552398); off with:
+///   TLG_VKB_PAR_GBUFFER=0  the G-buffer passes on the workers (issue 130: black floors / rooms)
+///   TLG_VKB_RECORD_ALL=0   record mode and batches for every pass (issue 130: the coloured glass lost in a batch)
+/// Still off: TLG_VKB_QUERY_CARRY=1  K2 fix B, late query groups carried to the next recording (issue 1: the light patch on headless guards)
 /// Old path (2026-11-27, api-contract.md K2 step 7): TLG_LEGACY_ANIM_QUERY_WAIT=1 = K2 fix A (the query recording waits for the soldiers' jobs); the default puts
 /// every readback-group producer on the engine's own query lock list (LockList, native_draw.cpp), same order, no wait.
 /// The state before is kept in branch 4090.
