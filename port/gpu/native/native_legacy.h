@@ -29,6 +29,8 @@
 /// Old path (2026-11-27, api-contract.md K2 step 7): TLG_LEGACY_ANIM_QUERY_WAIT=1 = K2 fix A (the query recording waits for the soldiers' jobs); the default puts
 /// every readback-group producer on the engine's own query lock list (LockList, native_draw.cpp), same order, no wait.
 /// The state before is kept in branch 4090.
+/// Old path (2026-11-27, research section 15 / K2 step 7): TLG_LEGACY_WORKER_WAITRENDER=1 lets engine worker 1 wait for the render thread before every job (a PS4 core
+/// share); the default returns at once (mid hook WaitRenderChain).
 /// Open backend switch (2026-11-27, issue 130, api-contract.md W5): TLG_LEGACY_MOVER_IN_STREAM=1 puts the heap mover's copies into the stream where it runs (behind an
 /// open worker pass whose later draws already read the moved resource); default: into the oldest open worker pass.
 /// Open backend switch (2026-11-18, api-contract.md S10): TLG_LEGACY_DEPTH_BIAS=1 applies the rasterizer description's depth bias (the engine never enables polygon offset).

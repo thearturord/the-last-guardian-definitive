@@ -9999,9 +9999,9 @@ u64 PS4_SYSV_ABI K2TaskObject(Core::GuestHooks::MidContext* c) {
 /// DAT_0689eed5 is set, i.e. until ps4render has finished recording the frame it took). Debug census (TLG_VKB_WAITRENDER_CENSUS=1, issue 1 / fix A cost):
 /// the call chain (return address, then the rbp chain) of every call, counted per chain, with how many calls found the render busy (those block).
 u64 PS4_SYSV_ABI WaitRenderChain(Core::GuestHooks::MidContext* c) {
-    // Kill experiment (TLG_VKB_TEST_SKIP_WAITRENDER=1, never a default): the call returns at once (continues at the lone `ret` at 01c4efa0, the stack as at
-    // the entry). Its only caller is Engine_WorkerThreadMain's worker index 1, which waits for the render thread before every job it takes (a PS4 core share).
-    static const bool skip = [] { const char* e = std::getenv("TLG_VKB_TEST_SKIP_WAITRENDER"); return e != nullptr && e[0] == '1'; }();
+    // Default since 2026-11-27: worker index 1 of Engine_WorkerThreadMain (01e4c420, its only caller) waits for ps4render before every job, a PS4 core share
+    // (ps4render pinned to core 0, workers 0-3 share cores 0-3); no data is guarded. The wait returns at once (continues at the lone `ret` at 01c4efa0). TLG_LEGACY_WORKER_WAITRENDER=1: the engine's wait.
+    static const bool skip = [] { const char* e = std::getenv("TLG_LEGACY_WORKER_WAITRENDER"); return e == nullptr || e[0] != '1'; }();
     if (skip) {
         return ImageBase() + 0x1c4efa0 - 0x1000000;
     }
