@@ -9837,6 +9837,53 @@ u64 PS4_SYSV_ABI K2TaskObject(Core::GuestHooks::MidContext* c) {
     return 0;
 }
 
+/// Mid hook at the entry of RenderDev::WaitRender (01c4efb0, device vtable 026e6e68 + 0x48: waits once on s_condWaitRender while the render thread's busy flag
+/// DAT_0689eed5 is set, i.e. until ps4render has finished recording the frame it took). Debug census (TLG_VKB_WAITRENDER_CENSUS=1, issue 1 / fix A cost):
+/// the call chain (return address, then the rbp chain) of every call, counted per chain, with how many calls found the render busy (those block).
+u64 PS4_SYSV_ABI WaitRenderChain(Core::GuestHooks::MidContext* c) {
+    // Kill experiment (TLG_VKB_TEST_SKIP_WAITRENDER=1, never a default): the call returns at once (continues at the lone `ret` at 01c4efa0, the stack as at
+    // the entry). Its only caller is Engine_WorkerThreadMain's worker index 1, which waits for the render thread before every job it takes (a PS4 core share).
+    static const bool skip = [] { const char* e = std::getenv("TLG_VKB_TEST_SKIP_WAITRENDER"); return e != nullptr && e[0] == '1'; }();
+    if (skip) {
+        return ImageBase() + 0x1c4efa0 - 0x1000000;
+    }
+    static const bool on = [] { const char* e = std::getenv("TLG_VKB_WAITRENDER_CENSUS"); return e != nullptr && e[0] == '1'; }();
+    if (!on) {
+        return 0;
+    }
+    Guarded([&]() -> u64 {
+        const u64 base = ImageBase();
+        const auto ghidra = [&](u64 a) { return a >= base && a < base + 0x4000000 ? a - base + 0x1000000 : a; };
+        std::string chain = fmt::format("{:#x}", ghidra(Rd<u64>(c->rsp, 0)));
+        u64 rbp = c->rbp;
+        for (u32 i = 0; i < 10 && rbp >= c->rsp && rbp < c->rsp + (4ull << 20) && (rbp & 7) == 0; ++i) {
+            const u64 ra = Rd<u64>(rbp, 8);
+            if (ra < base || ra > base + 0x4000000) {
+                break;
+            }
+            chain += fmt::format(" < {:#x}", ghidra(ra));
+            rbp = Rd<u64>(rbp, 0);
+        }
+        const bool busy = Rd<u8>(base + 0x689eed5 - 0x1000000, 0) != 0;
+        static std::mutex m;
+        static std::map<std::string, std::pair<u64, u64>> seen; // chain -> (calls, calls that found the render busy)
+        static u64 calls = 0;
+        std::scoped_lock lock{m};
+        auto& s = seen[chain + fmt::format(" (thread {})", GetCurrentThreadId())];
+        ++s.first;
+        s.second += busy ? 1 : 0;
+        if (++calls % 50000 == 0) {
+            std::string out;
+            for (const auto& [k, v] : seen) {
+                out += fmt::format("\n   [{} calls, {} busy] {}", v.first, v.second, k);
+            }
+            TLG_LOG(CP, Warn, "wait render census: {} calls{}", calls, out);
+        }
+        return 0;
+    });
+    return 0;
+}
+
 /// Mid hook at the entry of the task manager's enqueue (01e4ac30, vtable 026ebcc0 + 0x70): who enqueues a CharacterAnimationExt job (debug, K2 census)
 u64 PS4_SYSV_ABI K2Enqueue(Core::GuestHooks::MidContext* c) {
     if (!K2Census::On() || !IsHeapPointer(c->rsi) || Rd<u64>(c->rsi, 0) - ImageBase() + 0x1000000 != 0x26d54b8) {
@@ -12584,6 +12631,9 @@ u64 FindHandler(const std::string& name) {
     }
     if (name == "anim_query_recording") {
         return reinterpret_cast<u64>(&AnimQueryRecording);
+    }
+    if (name == "wait_render_chain") {
+        return reinterpret_cast<u64>(&WaitRenderChain);
     }
     if (name == "k2_animation_tick") {
         return reinterpret_cast<u64>(&K2AnimationTick);

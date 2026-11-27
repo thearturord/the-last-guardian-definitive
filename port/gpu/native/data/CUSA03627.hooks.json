@@ -333,6 +333,13 @@
       "expect": "554889e541574156"
     },
     {
+      "name": "WaitRenderChain",
+      "ghidra": "0x1c4efb0",
+      "mode": "mid",
+      "handler": "wait_render_chain",
+      "expect": "554889e5534881ec"
+    },
+    {
       "name": "QueryCarryAfterReset",
       "ghidra": "0x12770b0",
       "mode": "call",
