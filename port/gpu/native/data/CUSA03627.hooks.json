@@ -340,6 +340,13 @@
       "expect": "554889e5534881ec"
     },
     {
+      "name": "LockListRefill",
+      "ghidra": "0x12532a0",
+      "mode": "mid",
+      "handler": "lock_list_refill",
+      "expect": "418b842434010000"
+    },
+    {
       "name": "QueryCarryAfterReset",
       "ghidra": "0x12770b0",
       "mode": "call",

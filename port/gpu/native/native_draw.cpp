@@ -9412,13 +9412,84 @@ std::map<std::string, u64> chains;       ///< (mutex)
 u64 enqueues = 0, starts = 0, starts_in_wait = 0, sum_enqueue_to_start = 0, sum_wait_to_enqueue = 0, sum_wait_to_start = 0, enqueued_before_wait = 0; ///< (mutex)
 } // namespace TaskReady
 
+/// K2 root bound test (2026-11-27, TLG_VKB_TEST_LOCK_LIST=1, debug: never a default; fix A and fix B are off under it). The engine's own query lock list
+/// (slot 19 + 0x58 / + 0x60): DelayPrepareTick (012530a0) clears it after its reset (017287c0) and refills it with the extensions of one object group (+ 0x30);
+/// Gather (01254880) sets ext + 0x4c |= 2 and locks ext + 0x8c for each; AnimationTick (01d0ded0) then gives that extension's job the sync word + 0x8c, and the
+/// worker loop (01e4c420) defers a job whose sync word is set until DelayPrepareTick unlocks it after the next reset. So a listed character always registers its
+/// readback groups between the reset and the recording, and nothing waits. Only the boy is listed; this test adds every character animation extension whose
+/// job registered a group, right after 017287c0 cleared the list (mid hook at 012532a0, r12 = slot 19), through the engine's own append (01729ac0).
+/// Each tracked extension keeps one reference of ours for the rest of the run (test only: a despawned soldier's object is never freed).
+namespace LockList {
+bool On() {
+    static const bool on = [] { const char* e = std::getenv("TLG_VKB_TEST_LOCK_LIST"); return e != nullptr && e[0] == '1'; }();
+    return on;
+}
+constexpr u32 NoRefCount = 0xdeadc0de;
+thread_local u64 t_ext = 0; ///< the character animation extension whose AnimationTick job runs on this thread
+std::mutex mutex;
+std::vector<u64> producers; ///< (mutex) extensions whose job registered a group, each holding one reference of ours
+std::atomic<u64> c_appended{0}, c_cycles{0}, c_skipped_flag{0};
+
+void Registered() {
+    const u64 ext = t_ext;
+    if (ext == 0) {
+        return;
+    }
+    std::scoped_lock lock{mutex};
+    if (std::find(producers.begin(), producers.end(), ext) != producers.end()) {
+        return;
+    }
+    if (Rd<u32>(ext, 8) != NoRefCount) {
+        reinterpret_cast<std::atomic<u32>*>(ext + 8)->fetch_add(1); // our reference: the object stays alive while it is listed by us
+    }
+    producers.push_back(ext);
+    TLG_LOG(CP, Warn, "lock list test: extension {:#x} registers readback groups ({} tracked)", ext, producers.size());
+}
+
+void AfterListCleared(u64 slot19) {
+    c_cycles.fetch_add(1, std::memory_order_relaxed);
+    if ((Rd<u32>(slot19, 0x134) & 1) != 0) {
+        c_skipped_flag.fetch_add(1, std::memory_order_relaxed); // the engine builds no list in this state either
+        return;
+    }
+    using Append = void(PS4_SYSV_ABI*)(u64 list, u64 element_ptr);
+    static const auto append = reinterpret_cast<Append>(ImageBase() + 0x1729ac0 - 0x1000000);
+    std::scoped_lock lock{mutex};
+    for (const u64 ext : producers) {
+        bool listed = false;
+        for (u32 i = 0; i < Rd<u32>(slot19, 0x60) && !listed; ++i) {
+            listed = Rd<u64>(Rd<u64>(slot19, 0x58), 8ull * i) == ext;
+        }
+        if (listed) {
+            continue;
+        }
+        *reinterpret_cast<u32*>(ext + 0x4c) |= 0x44; // as DelayPrepareTick marks the extensions it lists (017287c0 clears these bits)
+        u64 element = ext;
+        append(slot19 + 0x58, reinterpret_cast<u64>(&element)); // the engine's own append: grows the array, takes the list's reference
+        c_appended.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (c_cycles.load(std::memory_order_relaxed) % 3000 == 0) {
+        TLG_LOG(CP, Warn, "lock list test: {} cycles, {} extensions tracked, {} appends, {} cycles with the no-list flag; list now {} entries",
+                c_cycles.load(), producers.size(), c_appended.load(), c_skipped_flag.load(), Rd<u32>(slot19, 0x60));
+    }
+}
+} // namespace LockList
+
+/// Mid hook at 012532a0 in DelayPrepareTick, right after 017287c0 cleared the query lock list (r12 = slot 19): the lock list bound test
+u64 PS4_SYSV_ABI LockListRefill(Core::GuestHooks::MidContext* c) {
+    if (LockList::On() && IsHeapPointer(c->r12)) {
+        Guarded([&]() -> u64 { LockList::AfterListCleared(c->r12); return 0; });
+    }
+    return 0;
+}
+
 namespace AnimQueryOrder {
 /// Fix A (2026-11-19): the recording waits for the next AnimationTick's unlocked query producers. Default again since 2026-11-23: QueryCarry (fix B, below), which
 /// kept the late groups for the next recording instead of waiting, is the lead for a soldier pushed against the camera flickering (issue 1), so it is off until it
 /// is reimplemented. Cost of fix A: with soldiers in the scene it waits ~3.4 ms nearly every frame (furthest save 76-80 fps against 123-131 with the carry).
 /// TLG_VKB_QUERY_CARRY=1: the carry instead (and no wait).
 bool On() {
-    static const bool on = [] { const char* e = std::getenv("TLG_VKB_QUERY_CARRY"); return e == nullptr || e[0] != '1'; }();
+    static const bool on = [] { const char* e = std::getenv("TLG_VKB_QUERY_CARRY"); return (e == nullptr || e[0] != '1') && !LockList::On(); }();
     return on;
 }
 std::mutex mutex;
@@ -9637,7 +9708,7 @@ void BeforeRecording() {
 namespace QueryCarry {
 /// OFF by default since 2026-11-23 (the lead for the soldier flicker, issue 1); TLG_VKB_QUERY_CARRY=1 turns it on (and fix A's wait off)
 bool On() {
-    return !AnimQueryOrder::On();
+    return !AnimQueryOrder::On() && !LockList::On();
 }
 constexpr u32 MaxCarried = 256;
 constexpr u32 DeadRef = 0xdeadc0de; ///< the engine's "no reference counting" mark in a group's + 8
@@ -9774,6 +9845,9 @@ u64 PS4_SYSV_ABI QueryCarryAfterReset(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u6
 
 /// Mid hook right after the scheduler ran a job's callback (01e4bb59, r12 = the job): the end of an AnimationTick module job (callback 01caa310, its object at job + 0x40)
 u64 PS4_SYSV_ABI AnimJobDone(Core::GuestHooks::MidContext* c) {
+    if (LockList::On()) {
+        LockList::t_ext = 0; // a job ended on this thread
+    }
     if (!AnimQueryOrder::On() || AnimQueryOrder::t_ext == 0 || !IsHeapPointer(c->r12)) {
         return 0;
     }
@@ -9841,6 +9915,9 @@ u64 PS4_SYSV_ABI AnimQueryRecording(Core::GuestHooks::MidContext* c) {
 }
 
 u64 PS4_SYSV_ABI K2TaskObject(Core::GuestHooks::MidContext* c) {
+    if (LockList::On() && IsHeapPointer(c->rdi) && Rd<u64>(c->rdi, 0) - ImageBase() + 0x1000000 == 0x26d54b8) {
+        LockList::t_ext = c->rdi;
+    }
     if (AnimQueryOrder::On() && IsHeapPointer(c->rdi) && Rd<u64>(c->rdi, 0) - ImageBase() + 0x1000000 == 0x26d54b8) {
         AnimQueryOrder::ExtJobStarted(c->rdi); // a character animation extension's AnimationTick job (slot 9) starts on this thread
     }
@@ -10051,6 +10128,9 @@ u64 PS4_SYSV_ABI K2AnimationTick(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5,
 
 u64 PS4_SYSV_ABI K2RegisterB(u64 table_base, u64 group, u64 a2, u64 a3, u64 a4, u64 a5, u64 ret) {
     (void)a2, (void)a3, (void)a4, (void)a5;
+    if (LockList::On()) {
+        Guarded([&]() -> u64 { LockList::Registered(); return 0; });
+    }
     if (AnimQueryOrder::On()) {
         AnimQueryOrder::QueryRegistered();
     }
@@ -10061,6 +10141,9 @@ u64 PS4_SYSV_ABI K2RegisterB(u64 table_base, u64 group, u64 a2, u64 a3, u64 a4, 
 }
 u64 PS4_SYSV_ABI K2RegisterC(u64 table_base, u64 group, u64 a2, u64 a3, u64 a4, u64 a5, u64 ret) {
     (void)a2, (void)a3, (void)a4, (void)a5;
+    if (LockList::On()) {
+        Guarded([&]() -> u64 { LockList::Registered(); return 0; });
+    }
     if (AnimQueryOrder::On()) {
         AnimQueryOrder::QueryRegistered();
     }
@@ -12758,6 +12841,9 @@ u64 FindHandler(const std::string& name) {
     }
     if (name == "wait_render_chain") {
         return reinterpret_cast<u64>(&WaitRenderChain);
+    }
+    if (name == "lock_list_refill") {
+        return reinterpret_cast<u64>(&LockListRefill);
     }
     if (name == "k2_animation_tick") {
         return reinterpret_cast<u64>(&K2AnimationTick);
