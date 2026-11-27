@@ -9412,23 +9412,36 @@ std::map<std::string, u64> chains;       ///< (mutex)
 u64 enqueues = 0, starts = 0, starts_in_wait = 0, sum_enqueue_to_start = 0, sum_wait_to_enqueue = 0, sum_wait_to_start = 0, enqueued_before_wait = 0; ///< (mutex)
 } // namespace TaskReady
 
-/// K2 root bound test (2026-11-27, TLG_VKB_TEST_LOCK_LIST=1, debug: never a default; fix A and fix B are off under it). The engine's own query lock list
-/// (slot 19 + 0x58 / + 0x60): DelayPrepareTick (012530a0) clears it after its reset (017287c0) and refills it with the extensions of one object group (+ 0x30);
-/// Gather (01254880) sets ext + 0x4c |= 2 and locks ext + 0x8c for each; AnimationTick (01d0ded0) then gives that extension's job the sync word + 0x8c, and the
-/// worker loop (01e4c420) defers a job whose sync word is set until DelayPrepareTick unlocks it after the next reset. So a listed character always registers its
-/// readback groups between the reset and the recording, and nothing waits. Only the boy is listed; this test adds every character animation extension whose
-/// job registered a group, right after 017287c0 cleared the list (mid hook at 012532a0, r12 = slot 19), through the engine's own append (01729ac0).
-/// Each tracked extension keeps one reference of ours for the rest of the run (test only: a despawned soldier's object is never freed).
+/// K2 proper fix (2026-11-27, default; api-contract.md "K2 root, step 7"). The engine already orders readback-group producers against the query recording with its
+/// own query lock list (slot 19 + 0x58 / + 0x60): DelayPrepareTick (012530a0) clears it after its reset (017287c0) and refills it with the extensions of one object
+/// group (+ 0x30); Gather (01254880) sets ext + 0x4c |= 2 and locks ext + 0x8c for each; AnimationTick (01d0ded0) then gives that extension's job the sync word + 0x8c,
+/// and the worker loop (01e4c420) defers a job whose sync word is set until DelayPrepareTick unlocks it after the next reset. So a listed character always registers
+/// its readback groups between the reset and the recording, and nothing waits. The engine lists only the boy (on the PS4 at 30 fps the soldiers' jobs mostly ran
+/// before the recording anyway). We also list every character animation extension whose job registered a group, right after 017287c0 cleared the list (mid hook
+/// at 012532a0, r12 = slot 19), through the engine's own append (01729ac0). Old paths: TLG_LEGACY_ANIM_QUERY_WAIT=1 = fix A (the recording waits),
+/// TLG_VKB_QUERY_CARRY=1 = fix B (late groups carried a cycle; issue 1).
+/// Each tracked extension holds one reference of ours (so it cannot be freed between its registration and our append); once it has not registered for
+/// ReleaseAfter cycles (despawned, or no longer querying) it is dropped and our reference released the engine's way (01cd54c0, its deferred release).
 namespace LockList {
 bool On() {
-    static const bool on = [] { const char* e = std::getenv("TLG_VKB_TEST_LOCK_LIST"); return e != nullptr && e[0] == '1'; }();
+    static const bool on = [] {
+        const char* wait = std::getenv("TLG_LEGACY_ANIM_QUERY_WAIT");
+        const char* carry = std::getenv("TLG_VKB_QUERY_CARRY");
+        return !(wait != nullptr && wait[0] == '1') && !(carry != nullptr && carry[0] == '1');
+    }();
     return on;
 }
 constexpr u32 NoRefCount = 0xdeadc0de;
+constexpr u64 ReleaseAfter = 240;
 thread_local u64 t_ext = 0; ///< the character animation extension whose AnimationTick job runs on this thread
+struct Tracked {
+    u64 ext;
+    u64 last_cycle; ///< the last lock list cycle in which its job registered a group
+};
 std::mutex mutex;
-std::vector<u64> producers; ///< (mutex) extensions whose job registered a group, each holding one reference of ours
-std::atomic<u64> c_appended{0}, c_cycles{0}, c_skipped_flag{0};
+std::vector<Tracked> producers; ///< (mutex) each holding one reference of ours
+u64 cycle = 0;                  ///< (mutex) DelayPrepareTick refills seen
+std::atomic<u64> c_appended{0}, c_released{0}, c_skipped_flag{0};
 
 void Registered() {
     const u64 ext = t_ext;
@@ -9436,46 +9449,69 @@ void Registered() {
         return;
     }
     std::scoped_lock lock{mutex};
-    if (std::find(producers.begin(), producers.end(), ext) != producers.end()) {
-        return;
+    for (auto& t : producers) {
+        if (t.ext == ext) {
+            t.last_cycle = cycle;
+            return;
+        }
     }
     if (Rd<u32>(ext, 8) != NoRefCount) {
-        reinterpret_cast<std::atomic<u32>*>(ext + 8)->fetch_add(1); // our reference: the object stays alive while it is listed by us
+        reinterpret_cast<std::atomic<u32>*>(ext + 8)->fetch_add(1); // our reference
     }
-    producers.push_back(ext);
-    TLG_LOG(CP, Warn, "lock list test: extension {:#x} registers readback groups ({} tracked)", ext, producers.size());
+    producers.push_back({ext, cycle});
+}
+
+void Release(u64 ext) { // (mutex held) the engine's release of one reference from a worker thread (as 017287c0 does without the main-thread flag)
+    if (Rd<u32>(ext, 8) == NoRefCount) {
+        return;
+    }
+    if (reinterpret_cast<std::atomic<u32>*>(ext + 8)->fetch_sub(1) == 1) {
+        using DeferredRelease = void(PS4_SYSV_ABI*)(u64 object);
+        static const auto deferred = reinterpret_cast<DeferredRelease>(ImageBase() + 0x1cd54c0 - 0x1000000);
+        deferred(ext);
+    }
+    c_released.fetch_add(1, std::memory_order_relaxed);
 }
 
 void AfterListCleared(u64 slot19) {
-    c_cycles.fetch_add(1, std::memory_order_relaxed);
+    std::scoped_lock lock{mutex};
+    ++cycle;
+    for (size_t i = 0; i < producers.size();) {
+        if (cycle - producers[i].last_cycle > ReleaseAfter) {
+            Release(producers[i].ext);
+            producers[i] = producers.back();
+            producers.pop_back();
+        } else {
+            ++i;
+        }
+    }
     if ((Rd<u32>(slot19, 0x134) & 1) != 0) {
         c_skipped_flag.fetch_add(1, std::memory_order_relaxed); // the engine builds no list in this state either
         return;
     }
     using Append = void(PS4_SYSV_ABI*)(u64 list, u64 element_ptr);
     static const auto append = reinterpret_cast<Append>(ImageBase() + 0x1729ac0 - 0x1000000);
-    std::scoped_lock lock{mutex};
-    for (const u64 ext : producers) {
+    for (const auto& t : producers) {
         bool listed = false;
         for (u32 i = 0; i < Rd<u32>(slot19, 0x60) && !listed; ++i) {
-            listed = Rd<u64>(Rd<u64>(slot19, 0x58), 8ull * i) == ext;
+            listed = Rd<u64>(Rd<u64>(slot19, 0x58), 8ull * i) == t.ext;
         }
         if (listed) {
             continue;
         }
-        *reinterpret_cast<u32*>(ext + 0x4c) |= 0x44; // as DelayPrepareTick marks the extensions it lists (017287c0 clears these bits)
-        u64 element = ext;
+        *reinterpret_cast<u32*>(t.ext + 0x4c) |= 0x44; // as DelayPrepareTick marks the extensions it lists (017287c0 clears these bits)
+        u64 element = t.ext;
         append(slot19 + 0x58, reinterpret_cast<u64>(&element)); // the engine's own append: grows the array, takes the list's reference
         c_appended.fetch_add(1, std::memory_order_relaxed);
     }
-    if (c_cycles.load(std::memory_order_relaxed) % 3000 == 0) {
-        TLG_LOG(CP, Warn, "lock list test: {} cycles, {} extensions tracked, {} appends, {} cycles with the no-list flag; list now {} entries",
-                c_cycles.load(), producers.size(), c_appended.load(), c_skipped_flag.load(), Rd<u32>(slot19, 0x60));
+    if (cycle % 6000 == 0) {
+        TLG_LOG(CP, Info, "K2 lock list: {} cycles, {} extensions listed by us, {} appends, {} released, {} cycles with the no-list flag", cycle, producers.size(),
+                c_appended.load(), c_released.load(), c_skipped_flag.load());
     }
 }
 } // namespace LockList
 
-/// Mid hook at 012532a0 in DelayPrepareTick, right after 017287c0 cleared the query lock list (r12 = slot 19): the lock list bound test
+/// Mid hook at 012532a0 in DelayPrepareTick, right after 017287c0 cleared the query lock list (r12 = slot 19): K2 lock list (default)
 u64 PS4_SYSV_ABI LockListRefill(Core::GuestHooks::MidContext* c) {
     if (LockList::On() && IsHeapPointer(c->r12)) {
         Guarded([&]() -> u64 { LockList::AfterListCleared(c->r12); return 0; });
@@ -9484,12 +9520,14 @@ u64 PS4_SYSV_ABI LockListRefill(Core::GuestHooks::MidContext* c) {
 }
 
 namespace AnimQueryOrder {
-/// Fix A (2026-11-19): the recording waits for the next AnimationTick's unlocked query producers. Default again since 2026-11-23: QueryCarry (fix B, below), which
-/// kept the late groups for the next recording instead of waiting, is the lead for a soldier pushed against the camera flickering (issue 1), so it is off until it
-/// is reimplemented. Cost of fix A: with soldiers in the scene it waits ~3.4 ms nearly every frame (furthest save 76-80 fps against 123-131 with the carry).
-/// TLG_VKB_QUERY_CARRY=1: the carry instead (and no wait).
+/// Fix A (2026-11-19): the recording waits for the next AnimationTick's unlocked query producers. Since 2026-11-27 an old path (TLG_LEGACY_ANIM_QUERY_WAIT=1):
+/// the lock list (LockList, above) gives the same order without the wait. Cost of fix A: with soldiers in the scene it waits ~3.4 ms nearly every frame.
 bool On() {
-    static const bool on = [] { const char* e = std::getenv("TLG_VKB_QUERY_CARRY"); return (e == nullptr || e[0] != '1') && !LockList::On(); }();
+    static const bool on = [] {
+        const char* wait = std::getenv("TLG_LEGACY_ANIM_QUERY_WAIT");
+        const char* carry = std::getenv("TLG_VKB_QUERY_CARRY");
+        return wait != nullptr && wait[0] == '1' && !(carry != nullptr && carry[0] == '1');
+    }();
     return on;
 }
 std::mutex mutex;
@@ -9706,7 +9744,7 @@ void BeforeRecording() {
 /// Table B (frame data + 0x31e60: array, + 0x31e68 count, + 0x31e6c capacity, + 0x31e74 lock word): each entry holds one reference of its group. The carry moves
 /// entries out before FrameData_Reset (so the reset does not release them) and back after it (the table owns the same references again): no reference changes.
 namespace QueryCarry {
-/// OFF by default since 2026-11-23 (the lead for the soldier flicker, issue 1); TLG_VKB_QUERY_CARRY=1 turns it on (and fix A's wait off)
+/// OFF by default since 2026-11-23 (the cause of issue 1: late groups recorded a cycle out of phase); TLG_VKB_QUERY_CARRY=1 turns it on (and the lock list off)
 bool On() {
     return !AnimQueryOrder::On() && !LockList::On();
 }

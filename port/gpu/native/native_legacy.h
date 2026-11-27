@@ -24,7 +24,9 @@
 /// 2026-11-23: three speed changes of 2026-11-21 are OFF by default until they are reimplemented (each is the lead for an open picture bug):
 ///   TLG_VKB_PAR_GBUFFER=1  the G-buffer passes on the workers (issue 130: black floors / rooms)
 ///   TLG_VKB_RECORD_ALL=1   record mode and batches for every pass (issue 130: the coloured glass lost in a batch)
-///   TLG_VKB_QUERY_CARRY=1  K2 fix B, late query groups carried to the next recording (issue 1: soldier flicker); default is fix A (the recording waits)
+///   TLG_VKB_QUERY_CARRY=1  K2 fix B, late query groups carried to the next recording (issue 1: the light patch on headless guards)
+/// Old path (2026-11-27, api-contract.md K2 step 7): TLG_LEGACY_ANIM_QUERY_WAIT=1 = K2 fix A (the query recording waits for the soldiers' jobs); the default puts
+/// every readback-group producer on the engine's own query lock list (LockList, native_draw.cpp), same order, no wait.
 /// The state before is kept in branch 4090.
 /// Open backend switch (2026-11-18, api-contract.md S10): TLG_LEGACY_DEPTH_BIAS=1 applies the rasterizer description's depth bias (the engine never enables polygon offset).
 /// Open backend switch (2026-11-18, api-contract.md R8): TLG_LEGACY_VIEW_IDENTITY=1 creates every view with the identity channel mapping instead of the T#'s selects.
