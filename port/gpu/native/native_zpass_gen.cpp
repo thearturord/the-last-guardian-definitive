@@ -4919,6 +4919,12 @@ struct ParState {
     std::atomic<u64> list_changed{0}, list_checked{0};
     std::array<std::atomic<bool>, ParSlots> busy{};
     std::array<std::atomic<bool>, 16> serial_next{}, view_off{};
+    // issue 130 (floors): a G-buffer frame has several passes, all on view 15, so one per-view "run the engine's loop next" flag was taken by whichever pass came next
+    // and the pass that needed the loop (to create its variants / render data) never got it: its pieces stayed out for good (s17_SentinelTower roof floors). The request
+    // is kept per pass (the engine's list header) instead; g_held counts passes the engine's thread kept (pieces to learn found before the hand-over)
+    std::mutex g_serial_mutex;
+    std::vector<u64> g_serial;
+    std::atomic<u64> g_held{0}, g_learn_asked{0};
     std::array<std::atomic<u64>, 16> need{};
     std::atomic<s64> pend_draws{0}, pend_triangles{0};
     std::atomic<u64> calls{0}, passes{0}, no_slot{0}, copy_faults{0}, scan_faults{0}, worker_faults{0}, learn_frames{0}, views_off{0};
@@ -4968,7 +4974,24 @@ void ParTarget(Target& t, const ParTask& task, u32 index) {
     t.group_clone = ps.mem[index].group_object != nullptr ? ps.mem[index].group_object : ps.mem[index].group_clone.data();
     t.rs_stage = ps.mem[index].rs_stage.data();
 }
-void ParReasons(const std::vector<const char*>& reasons, u32 view) {
+void ParAskLoopFor(u64 list) { // the G-buffer pass with this list runs the engine's loop at its next hand-over
+    ParState& ps = PS();
+    std::scoped_lock lock{ps.g_serial_mutex};
+    if (std::find(ps.g_serial.begin(), ps.g_serial.end(), list) == ps.g_serial.end() && ps.g_serial.size() < 64) {
+        ps.g_serial.push_back(list);
+    }
+    ps.g_learn_asked.fetch_add(1, std::memory_order_relaxed);
+}
+bool ParTakeLoopFor(u64 list) {
+    ParState& ps = PS();
+    std::scoped_lock lock{ps.g_serial_mutex};
+    if (const auto it = std::find(ps.g_serial.begin(), ps.g_serial.end(), list); it != ps.g_serial.end()) {
+        ps.g_serial.erase(it);
+        return true;
+    }
+    return false;
+}
+void ParReasons(const std::vector<const char*>& reasons, u32 view, u64 g_list = 0) {
     ParState& ps = PS();
     bool learn = false, off = false;
     for (const char* r : reasons) {
@@ -4980,7 +5003,11 @@ void ParReasons(const std::vector<const char*>& reasons, u32 view) {
         ps.view_off[view].store(true, std::memory_order_relaxed);
         ps.views_off.fetch_add(1, std::memory_order_relaxed);
     } else if (learn) {
-        ps.serial_next[view].store(true, std::memory_order_relaxed);
+        if (g_list != 0) {
+            ParAskLoopFor(g_list);
+        } else {
+            ps.serial_next[view].store(true, std::memory_order_relaxed);
+        }
         ps.learn_frames.fetch_add(1, std::memory_order_relaxed);
     }
 }
@@ -5015,10 +5042,10 @@ void ParWorkG(ParTask& task, u32 index) {
     plan.v_b60 = task.v_b60;
     if (!plan.scanned) {
         ps.scan_faults.fetch_add(1, std::memory_order_relaxed);
-        ps.serial_next[ParGView].store(true, std::memory_order_relaxed);
+        ParAskLoopFor(task.list);
         return;
     }
-    ParReasons(plan.reasons, ParGView);
+    ParReasons(plan.reasons, ParGView, task.list);
     struct Args {
         Target t;
         const GPlan* plan;
@@ -5142,7 +5169,7 @@ void ParPublish() {
         }
     }
     nlohmann::json out = {{"calls", ps.calls.load()}, {"passes", ps.passes.load()}, {"no_slot", ps.no_slot.load()}, {"copy_faults", ps.copy_faults.load()},
-                          {"scan_faults", ps.scan_faults.load()}, {"worker_faults", ps.worker_faults.load()}, {"learn_frames", ps.learn_frames.load()}, {"list_checked", ps.list_checked.load()}, {"cbs_frozen", ps.cbs_frozen.load()}, {"list_changed", ps.list_changed.load()},
+                          {"scan_faults", ps.scan_faults.load()}, {"worker_faults", ps.worker_faults.load()}, {"learn_frames", ps.learn_frames.load()}, {"g_held", ps.g_held.load()}, {"g_learn_asked", ps.g_learn_asked.load()},{"list_checked", ps.list_checked.load()}, {"cbs_frozen", ps.cbs_frozen.load()}, {"list_changed", ps.list_changed.load()},
                           {"views_off", ps.views_off.load()}, {"steps", ps.steps.load()}, {"drawn", ps.drawn.load()}, {"refused", ps.refused.load()},
                           {"unlearned", ps.unlearned.load()}, {"rs_fail", ps.rs_fail.load()}, {"group_fail", ps.group_fail.load()}, {"arena_short", ps.arena_short.load()},
                           {"worker_ms", static_cast<double>(ps.worker_ns.load()) / 1e6}, {"reasons", reasons},
@@ -5438,14 +5465,14 @@ bool ParKickG(u64 rd, u64 mode, u64 list, u64 args, u64 flags, u64 query_mode) {
     if (mode == 1 || query_mode == 1 || query_mode == 2 || query_mode == 5 || list == 0) {
         return false;
     }
-    if (ps.view_off[ParGView].load(std::memory_order_relaxed) || ps.serial_next[ParGView].exchange(false, std::memory_order_relaxed)) {
+    if (ps.view_off[ParGView].load(std::memory_order_relaxed) || ParTakeLoopFor(list)) {
         return false;
     }
     struct Head {
         u64 rd, list, flags, ctx, v68;
         u32 last_flags;
-        bool ok;
-    } head{rd, list, flags, 0, 0, 0, false};
+        bool ok, learn;
+    } head{rd, list, flags, 0, 0, 0, false, false};
     if (!NativeDraw::GuardedCall(
             [](void* p) {
                 auto* h = static_cast<Head*>(p);
@@ -5471,10 +5498,59 @@ bool ParKickG(u64 rd, u64 mode, u64 list, u64 args, u64 flags, u64 query_mode) {
                         break;
                     }
                 }
+                // issue 130 (floors): what ScanGBuffer leaves out because the engine's loop creates it at first use (render data, the primitive's cached variant). A worker
+                // would draw the pass without those pieces and the loop would never run to create them, so such a pass stays on this thread this time (the loop then makes
+                // them and the worker takes the pass from the next frame on). Same tests as the scan, any pass, read on the live list before the hand-over
+                for (u32 b = 0; b < count && !h->learn; ++b) {
+                    const u64 batch = R<u64>(array + u64{b} * 8);
+                    if (batch == 0 || R<u64>(batch + 0x48) != 0) {
+                        continue;
+                    }
+                    if (const u64 second = R<u64>(batch + 0x28); second != 0) {
+                        const u64 second_data = R<u64>(second + 0x38);
+                        if (second_data == 0 || R<u64>(second_data + 0x20) == 0) {
+                            h->learn = true;
+                            break;
+                        }
+                    }
+                    const u64 mesh = R<u64>(batch + 0x20);
+                    if (mesh == 0) {
+                        continue;
+                    }
+                    const u64 render_data = R<u64>(mesh + 0x38);
+                    if (render_data == 0 || R<u64>(render_data + 0x20) == 0) {
+                        h->learn = true;
+                        break;
+                    }
+                    if (const u64 group = R<u64>(batch + 0x38); group != 0) {
+                        const u64 group_inner = R<u64>(group + 8);
+                        const u64 group_object = group_inner != 0 ? R<u64>(group_inner + 0x38) : 0;
+                        if (group_object == 0 || R<u32>(R<u64>(group_object + 0x28) + 0x48) == 0) {
+                            continue; // the scan reads no primitives of this batch
+                        }
+                    }
+                    const u16 prim_count = R<u16>(batch + 100);
+                    const u64 prim_array = R<u64>(batch + 0x58);
+                    for (u32 p = 0; p < prim_count; ++p) {
+                        const u64 record = prim_array + u64{p} * 0x38;
+                        const u64 data = R<u64>(record + 0x28);
+                        if (data == 0 || R<s32>(record + 0x24) >= 0) {
+                            continue;
+                        }
+                        if (R<u64>(data + 0x40) == 0 || R<u32>(record + 0x30) != 0) {
+                            h->learn = true;
+                            break;
+                        }
+                    }
+                }
                 h->ok = true;
             },
             &head) ||
         !head.ok) {
+        return false;
+    }
+    if (head.learn) {
+        ps.g_held.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
     const u64 ctx = head.ctx;

@@ -3361,7 +3361,9 @@ bool LeanAppend(u64 ctx, Variant& v, const VkbVulkan::FixedState& fixed, u32 kin
         d.args_buffer = aw.buffer, d.args_offset = aw.offset;
         uses.push_back(Stream::BufferUse(aw.buffer, aw.offset, 20, false));
     } else {
-        d.count = static_cast<u32>(a1), d.first = static_cast<u32>(a2), d.vertex_offset = static_cast<s32>(static_cast<u32>(a3));
+        // issue 130: what Vulkan adds to the vertex index, as the plain path (0 when the vertex shader adds the base vertex itself; a3 drew such a mesh at twice
+        // its offset, the eye sign's glass in s07 AL_a01_SkyAthletics_01)
+        d.count = static_cast<u32>(a1), d.first = static_cast<u32>(a2), d.vertex_offset = static_cast<s32>(VulkanFirstVertex(ctx, v, static_cast<u32>(a3)));
     }
     if (!t_batch || t_batch->serial != serial) { // a job went into the stream while the row was made (it flushed the batch): the generic path
         return false;
@@ -3431,7 +3433,7 @@ bool JoinBatch(DrawJob& job) {
     t_batch->uses.insert(t_batch->uses.end(), job.uses.begin(), job.uses.end());
     t_batch->draws.push_back({.pipeline = job.pipeline, .layout = job.layout, .fixed = job.fixed_state, .masks = job.masks, .push = job.push,
                               .index_buffer = job.index_buffer, .index_offset = job.index_offset, .index_type = job.index_type, .index_size = job.index_size, .args_buffer = job.kind == 2 ? job.args_buffer : vk::Buffer{}, .args_offset = job.args_offset, .count = static_cast<u32>(job.a1),
-                              .first = static_cast<u32>(job.a2), .instances = job.instances, .vertex_offset = static_cast<s32>(static_cast<u32>(job.a3)), .ps_hash = job.ps_hash,
+                              .first = static_cast<u32>(job.a2), .instances = job.instances, .vertex_offset = static_cast<s32>(job.first_vertex), .ps_hash = job.ps_hash,
                               .color_format0 = job.color_format0, .jittered = job.jittered, .jitter = job.jitter});
     return true;
 }
