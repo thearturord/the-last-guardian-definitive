@@ -10177,6 +10177,15 @@ u64 PS4_SYSV_ABI K2RegisterB(u64 table_base, u64 group, u64 a2, u64 a3, u64 a4, 
     }
     return 0;
 }
+/// Table A (FrameData_AddReadbackGroupA 01ce5a10, base = frame data + 0x31e30 like B and C): census only (debug, TLG_K2_CENSUS=1), no lock-list learning
+/// (static race pass 2026-11-28, suspect 1: table A was never counted)
+u64 PS4_SYSV_ABI K2RegisterA(u64 table_base, u64 group, u64 a2, u64 a3, u64 a4, u64 a5, u64 ret) {
+    (void)a2, (void)a3, (void)a4, (void)a5;
+    if (K2Census::On()) {
+        Guarded([&]() -> u64 { K2Census::Registered('A', table_base, group, ret); return 0; });
+    }
+    return 0;
+}
 u64 PS4_SYSV_ABI K2RegisterC(u64 table_base, u64 group, u64 a2, u64 a3, u64 a4, u64 a5, u64 ret) {
     (void)a2, (void)a3, (void)a4, (void)a5;
     if (LockList::On()) {
@@ -12858,6 +12867,9 @@ u64 FindHandler(const std::string& name) {
     }
     if (name == "note_c_gbuf_variant") {
         return reinterpret_cast<u64>(&NoteCGbufVariant);
+    }
+    if (name == "k2_register_a") {
+        return reinterpret_cast<u64>(&K2RegisterA);
     }
     if (name == "k2_register_b") {
         return reinterpret_cast<u64>(&K2RegisterB);

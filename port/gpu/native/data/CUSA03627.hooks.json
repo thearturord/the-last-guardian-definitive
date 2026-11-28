@@ -256,6 +256,13 @@
       "expect": "554889e541574156"
     },
     {
+      "name": "K2_RegisterGroupA",
+      "ghidra": "0x1ce5a10",
+      "mode": "call",
+      "handler": "k2_register_a",
+      "expect": "554889e541574156"
+    },
+    {
       "name": "K2_RegisterGroupB",
       "ghidra": "0x1ce5da0",
       "mode": "call",
