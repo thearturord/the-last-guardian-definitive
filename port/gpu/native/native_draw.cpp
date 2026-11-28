@@ -9326,7 +9326,45 @@ void Began(u64 frame, u64 recording, u64 ret) {
         TLG_LOG(CP, Warn, "K2 census: BeginRecording {} on frame data {:#x} without a reset since the last one (arg {})", e.begins_since_reset, frame, recording);
     }
 }
+/// SR2 (static-race-pass-2026-11-28.md suspect 2): a task that registers into the delayed query table C with no graph edge to DelayPrepareTick started. Counted by
+/// where it falls in the delayed query cycle: after this cycle's reset (its registrations would be on time) or between the last BeginRecording and the reset (the
+/// reset would drop them). It needs no registration: the task runs every cycle.
+std::map<std::string, std::pair<u64, u64>> task_order; ///< task -> (after the reset, before it)
+void TaskStarted(const char* name) {
+    std::scoped_lock lock{mutex};
+    u64 alt = 0;
+    u32 bit = 0;
+    Switch(alt, bit);
+    if (!IsHeapPointer(alt)) {
+        return;
+    }
+    const FrameEntry& e = Entry(alt);
+    if (e.resets == 0) {
+        return; // before the first cycle
+    }
+    auto& c = task_order[name];
+    (e.begins_since_reset != 0 ? c.second : c.first)++;
+    if ((c.first + c.second) % 1800 == 0) {
+        std::string sum;
+        for (const auto& [k, v] : task_order) {
+            sum += fmt::format("[{}: after the reset {}, before it {}] ", k, v.first, v.second);
+        }
+        TLG_LOG(CP, Warn, "K2 census: SR2 task order in the delayed query cycle: {}", sum);
+    }
+}
 } // namespace K2Census
+u64 PS4_SYSV_ABI Sr2PointTracker(u64, u64, u64, u64, u64, u64, u64) {
+    if (K2Census::On()) {
+        Guarded([&]() -> u64 { K2Census::TaskStarted("PointTrackerManagerTick"); return 0; });
+    }
+    return 0;
+}
+u64 PS4_SYSV_ABI Sr2TricoAnimPost(u64, u64, u64, u64, u64, u64, u64) {
+    if (K2Census::On()) {
+        Guarded([&]() -> u64 { K2Census::TaskStarted("TricoPhysicsExtTick_AnimationPostPhysicsTick"); return 0; });
+    }
+    return 0;
+}
 
 /// Mid hook at the entry of 017d3f40 (Trico's contact producer): the return addresses up the frame-pointer chain (game functions keep rbp), as ghidra addresses
 u64 PS4_SYSV_ABI K2TricoChain(Core::GuestHooks::MidContext* c) {
@@ -12921,6 +12959,12 @@ u64 FindHandler(const std::string& name) {
     }
     if (name == "note_c_gbuf_variant") {
         return reinterpret_cast<u64>(&NoteCGbufVariant);
+    }
+    if (name == "sr2_point_tracker") {
+        return reinterpret_cast<u64>(&Sr2PointTracker);
+    }
+    if (name == "sr2_trico_anim_post") {
+        return reinterpret_cast<u64>(&Sr2TricoAnimPost);
     }
     if (name == "open_item_predication") {
         return reinterpret_cast<u64>(&OpenItemPredication);

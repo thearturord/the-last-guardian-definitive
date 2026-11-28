@@ -111,6 +111,7 @@ bool QueryCarryOn() {
 }
 std::unordered_map<u64, bool> query_chain_seen; ///< D4-10: per block, "seen" so far over the cut parts of its open interval (blocks_mutex)
 std::atomic<u64> c_q_carried{0}, c_q_chained_answers{0};
+std::array<std::atomic<u64>, 3> c_q_carried_by{}; ///< D4-10: submissions closed inside a query, by who asked for the submit (other, graphics, async compute)
 std::array<QuerySlot, QuerySlots> query_slots{};
 u32 query_next = 0;
 struct QueryBlock {
@@ -1245,7 +1246,9 @@ u32 SplitJobs() {
 } // namespace
 
 extern std::atomic<void (*)(u32)> g_before_enqueue; // R3b (defined at Enqueue)
-u64 Submit() {
+thread_local u32 t_submit_source = 0; ///< D4-10 counts: who asked for the submit being closed (Submit's `source`)
+u64 Submit(u32 source) {
+    t_submit_source = source;
     if (auto* hook = g_before_enqueue.load(std::memory_order_acquire)) {
         hook(~0u); // R3b: the open batch belongs to this submission
     }
@@ -1551,6 +1554,12 @@ u64 CloseSubmission() {
         cut->work = Work::Other;
         batch.push_back({cut.release(), value});
         resume_query = true;
+        const u32 source = std::min<u32>(t_submit_source, 2);
+        if (c_q_carried_by[source].fetch_add(1, std::memory_order_relaxed) < 5) {
+            static constexpr const char* names[] = {"other", "the engine's graphics submit", "the engine's async compute submit"};
+            LOG_WARNING(Render_Vulkan, "D4-10: {} closed a submission inside the occlusion query of block {:#x}; the next submission carries it on", names[source],
+                    open_query_address);
+        }
     }
     batch.push_back({nullptr, value});
     FlushBatch();
@@ -2783,7 +2792,8 @@ nlohmann::json Report() {
     return {{"occlusion", {{"begun", c_q_begun.load()}, {"ended", c_q_ended.load()}, {"seen", c_q_seen.load()}, {"hidden", c_q_hidden.load()},
                            {"first_answers_visible", c_q_first.load()}, {"nested_ignored", c_q_nested.load()}, {"dropped_unanswered", c_q_dropped.load()},
                            {"ended_by_a_submit", c_q_cut_by_submit.load()}, {"end_without_begin", c_q_unmatched_end.load()},
-                           {"carried_across_a_submit", c_q_carried.load()}, {"chained_answers", c_q_chained_answers.load()}}},
+                           {"carried_across_a_submit", c_q_carried.load()}, {"chained_answers", c_q_chained_answers.load()},
+                           {"carry_by_submit", {{"other", c_q_carried_by[0].load()}, {"graphics", c_q_carried_by[1].load()}, {"async_compute", c_q_carried_by[2].load()}}}}},
             {"copies_in_front_of_a_job", {{"copies", c_copies_first.load()}, {"mb", c_copies_first_mb.load() >> 20}, {"recorded_in_a_run", c_copies_first_in_run.load()}, {"as_a_job_of_their_own", c_copies_first_own_job.load()}}},
             {"staging", {{"on", StageOn()}, {"copies", c_staged.load()}, {"mb_copied", c_staged_bytes.load() >> 20}, {"reused_in_a_submission", c_stage_reused.load()}, {"merge", StageMergeOn()}, {"reads_inside_a_staged_region", c_stage_covered.load()},
                           {"copies_that_took_in_overlapping_regions", c_stage_merged.load()}, {"unions_over_the_size_limit", c_stage_merge_too_big.load()}, {"copies_from_the_frame_ring", c_stage_ring.load()},

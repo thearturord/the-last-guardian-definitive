@@ -598,7 +598,7 @@ void SubmitGraphics() {
         Stream::DeferUnlocked([entries = Take(GraphicsQueue), index, made = std::chrono::steady_clock::now()](vk::CommandBuffer) mutable {
             NoteQueued(0, made);
             Stream::PollQueries(); // V5b: the answers of the queries the GPU has finished
-            const u64 value = Stream::Submit();
+            const u64 value = Stream::Submit(1);
             Stream::NewFrame();
             submit_values[index % SubmitValueRing].store(value, std::memory_order_release);
             submitted_index.store(index, std::memory_order_release);
@@ -635,7 +635,7 @@ void SubmitCompute(u32 queue, u32 pipe_id) {
     if (Stream::Ready() && OverlapOn()) {
         Stream::DeferUnlocked([entries = Take(queue), pipe_id, made = std::chrono::steady_clock::now()](vk::CommandBuffer) mutable {
             NoteQueued(1, made);
-            const u64 value = Stream::Submit();
+            const u64 value = Stream::Submit(2);
             Compute::FrameDone();
             static const bool early = [] { const char* e = std::getenv("TLG_VKB_EARLY_COMPUTE_FENCE"); return e != nullptr && e[0] == '1'; }(); // kill-experiment only
             if (early) {

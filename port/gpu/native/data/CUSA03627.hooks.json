@@ -266,6 +266,20 @@
       "expect": "554889e541574156"
     },
     {
+      "name": "SR2_PointTrackerManagerTick",
+      "ghidra": "0x124deb0",
+      "mode": "call",
+      "handler": "sr2_point_tracker",
+      "expect": "554889e541565348"
+    },
+    {
+      "name": "SR2_TricoAnimPostPhysicsTick",
+      "ghidra": "0x1249ed0",
+      "mode": "call",
+      "handler": "sr2_trico_anim_post",
+      "expect": "554889e541574156"
+    },
+    {
       "name": "K2_RegisterGroupA",
       "ghidra": "0x1ce5a10",
       "mode": "call",

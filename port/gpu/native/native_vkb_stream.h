@@ -309,8 +309,9 @@ void NotePassDraw(u32 flags, u64 ps_hash, u32 format, const vk::Viewport& viewpo
 /// Ends the open pass, if any (lock held): before a barrier or any command that is not a draw
 void BreakPass(vk::CommandBuffer cmd);
 
-/// Submits what was recorded since the last submit; returns the timeline value that is reached when it is done (the last value when nothing was recorded)
-u64 Submit();
+/// Submits what was recorded since the last submit; returns the timeline value that is reached when it is done (the last value when nothing was recorded).
+/// `source` (debug, the D4-10 counts): 1 the engine's graphics submit, 2 its async compute submit, 0 other.
+u64 Submit(u32 source = 0);
 /// The last value handed out by Submit
 [[nodiscard]] u64 LastValue();
 /// R4a: the timeline value the command buffer being recorded on this thread goes out with (inside a job; LastValue() + 1 on the single recorder)
