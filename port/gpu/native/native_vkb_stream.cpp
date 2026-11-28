@@ -99,7 +99,18 @@ struct QuerySlot {
     u64 address{};
     u64 value{}; ///< the timeline value of the submission that ended it
     bool pending{};
+    bool cut{};     ///< D4-10: ended at a submission's end while the engine's query goes on (its count is part of the interval's)
+    bool chained{}; ///< D4-10: begun at the next submission's start to carry an interval on (its answer adds the earlier parts)
 };
+/// D4-10 (open-items.md): the engine's occlusion query counts every draw between its begin and its end, whatever is submitted in between (on PS4 the Z pass
+/// counters are dumped at both ends, across submits). A Vulkan query lives in one command buffer, so an interval cut by a submission goes on in a new query at
+/// the next submission's start; the block is "seen" when any part was. LEGACY(query_cut): TLG_LEGACY_QUERY_CUT=1 ends the query at the submit (a part count).
+bool QueryCarryOn() {
+    static const bool on = [] { const char* e = std::getenv("TLG_LEGACY_QUERY_CUT"); return !(e != nullptr && e[0] == '1'); }();
+    return on;
+}
+std::unordered_map<u64, bool> query_chain_seen; ///< D4-10: per block, "seen" so far over the cut parts of its open interval (blocks_mutex)
+std::atomic<u64> c_q_carried{0}, c_q_chained_answers{0};
 std::array<QuerySlot, QuerySlots> query_slots{};
 u32 query_next = 0;
 struct QueryBlock {
@@ -1499,6 +1510,8 @@ Worker* open_worker = nullptr;    ///< the resolver's open submission (none: nul
 u64 open_value = 0;
 u32 open_jobs = 0;
 bool open_query = false;
+u64 open_query_address = 0; ///< D4-10: the block of the open query
+bool resume_query = false;  ///< D4-10: a submission closed inside a query: the next one begins with its continuation
 std::vector<Item> batch; ///< items for open_worker not handed over yet
 std::atomic<u64> c_r4a_submissions{0}, c_r4a_jobs{0}, c_r4a_transition_jobs{0}, c_r4a_worker_waits{0}, c_r4a_batches{0};
 struct TransitionJob final : Job {
@@ -1527,6 +1540,18 @@ u64 CloseSubmission() {
         return std::max(closed_value.load(std::memory_order_relaxed), last_value.load(std::memory_order_relaxed));
     }
     const u64 value = open_value;
+    if (open_query && QueryCarryOn()) {
+        // D4-10: the engine submits inside an occlusion query: this submission's part of it ends here, the next submission carries it on
+        struct CutQuery {
+            void operator()(vk::CommandBuffer cmd) const {
+                QueryCut(cmd);
+            }
+        };
+        auto cut = std::make_unique<FnJob<CutQuery>>(CutQuery{});
+        cut->work = Work::Other;
+        batch.push_back({cut.release(), value});
+        resume_query = true;
+    }
     batch.push_back({nullptr, value});
     FlushBatch();
     closed_value.store(value, std::memory_order_release);
@@ -1539,9 +1564,26 @@ void AddToSubmission(std::unique_ptr<Job> job) {
     if (open_worker == nullptr) {
         open_value = next_value.fetch_add(1, std::memory_order_relaxed) + 1;
         open_worker = &workers[open_value % Recorders()];
+        if (resume_query) { // D4-10: the query cut at the last submission goes on first thing in this one
+            resume_query = false;
+            if (open_query) {
+                struct ResumeQuery {
+                    u64 address;
+                    void operator()(vk::CommandBuffer cmd) const {
+                        QueryBegin(cmd, address, true);
+                    }
+                };
+                auto resume = std::make_unique<FnJob<ResumeQuery>>(ResumeQuery{open_query_address});
+                resume->work = Work::Other;
+                batch.push_back({resume.release(), open_value});
+            }
+        }
     }
     if (job->query != 0) {
         open_query = job->query > 0;
+        if (open_query) {
+            open_query_address = job->query_address;
+        }
     }
     const bool counts = job->locked;
     const u32 weight = job->weight;
@@ -2021,7 +2063,7 @@ void FirstAnswer(u64 address, u32 pairs) {
     }
 }
 
-void QueryBegin(vk::CommandBuffer cmd, u64 address) {
+void QueryBegin(vk::CommandBuffer cmd, u64 address, bool chained) {
     if (!occlusion_pool) {
         return;
     }
@@ -2037,14 +2079,32 @@ void QueryBegin(vk::CommandBuffer cmd, u64 address) {
         if (query_slots[index].pending) {
             c_q_dropped.fetch_add(1, std::memory_order_relaxed);
         }
-        query_slots[index] = {address, 0, false};
+        query_slots[index] = {address, 0, false, false, chained};
     }
     cmd.resetQueryPool(occlusion_pool, index, 1);
     cmd.beginQuery(occlusion_pool, index, {});
     t_rec->query_open = true;
     t_rec->query_open_index = index;
     t_rec->query_open_address = address;
-    c_q_begun.fetch_add(1, std::memory_order_relaxed);
+    if (!chained) {
+        c_q_begun.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+void QueryCut(vk::CommandBuffer cmd) {
+    if (!t_rec->query_open) {
+        return;
+    }
+    cmd.endQuery(occlusion_pool, t_rec->query_open_index);
+    {
+        std::scoped_lock blocks_lock{blocks_mutex};
+        QuerySlot& slot = query_slots[t_rec->query_open_index];
+        slot.pending = true;
+        slot.cut = true;
+        slot.value = RecValue(); // this command buffer's
+    }
+    t_rec->query_open = false;
+    c_q_carried.fetch_add(1, std::memory_order_relaxed);
 }
 
 void QueryEnd(vk::CommandBuffer cmd, u64 address) {
@@ -2085,7 +2145,18 @@ void PollQueries() {
             continue;
         }
         slot.pending = false;
-        const bool seen = result[0] != 0;
+        bool seen = result[0] != 0;
+        if (slot.chained) { // D4-10: the earlier parts of this interval (the GPU finishes submissions in order, and this loop goes in issue order)
+            if (const auto it = query_chain_seen.find(slot.address); it != query_chain_seen.end()) {
+                seen = seen || it->second;
+                query_chain_seen.erase(it);
+            }
+            c_q_chained_answers.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (slot.cut) {
+            query_chain_seen[slot.address] = seen; // the interval goes on in a chained query: no answer yet
+            continue;
+        }
         (seen ? c_q_seen : c_q_hidden).fetch_add(1, std::memory_order_relaxed);
         WriteAnswerLocked(slot.address, seen);
     }
@@ -2711,7 +2782,8 @@ nlohmann::json Report() {
     }
     return {{"occlusion", {{"begun", c_q_begun.load()}, {"ended", c_q_ended.load()}, {"seen", c_q_seen.load()}, {"hidden", c_q_hidden.load()},
                            {"first_answers_visible", c_q_first.load()}, {"nested_ignored", c_q_nested.load()}, {"dropped_unanswered", c_q_dropped.load()},
-                           {"ended_by_a_submit", c_q_cut_by_submit.load()}, {"end_without_begin", c_q_unmatched_end.load()}}},
+                           {"ended_by_a_submit", c_q_cut_by_submit.load()}, {"end_without_begin", c_q_unmatched_end.load()},
+                           {"carried_across_a_submit", c_q_carried.load()}, {"chained_answers", c_q_chained_answers.load()}}},
             {"copies_in_front_of_a_job", {{"copies", c_copies_first.load()}, {"mb", c_copies_first_mb.load() >> 20}, {"recorded_in_a_run", c_copies_first_in_run.load()}, {"as_a_job_of_their_own", c_copies_first_own_job.load()}}},
             {"staging", {{"on", StageOn()}, {"copies", c_staged.load()}, {"mb_copied", c_staged_bytes.load() >> 20}, {"reused_in_a_submission", c_stage_reused.load()}, {"merge", StageMergeOn()}, {"reads_inside_a_staged_region", c_stage_covered.load()},
                           {"copies_that_took_in_overlapping_regions", c_stage_merged.load()}, {"unions_over_the_size_limit", c_stage_merge_too_big.load()}, {"copies_from_the_frame_ring", c_stage_ring.load()},

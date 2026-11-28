@@ -711,7 +711,7 @@ u64 PS4_SYSV_ABI OcclusionBeginHook(u64 ctx, u64 address, u64, u64, u64, u64, u6
         Core::RareEvents::OpenItem("D4-09", fmt::format("an occlusion query (block {:#x}) with TLG_VKB_OVERLAP=0: no measured answer", address));
     }
     Stream::FirstAnswer(address, pairs);
-    Stream::DeferQuery(1, [address](vk::CommandBuffer cmd) { Stream::QueryBegin(cmd, address); });
+    Stream::DeferQuery(1, address, [address](vk::CommandBuffer cmd) { Stream::QueryBegin(cmd, address); });
     (void)ctx;
     return 0; // the engine's function runs (its packets go unread)
 }
@@ -720,7 +720,7 @@ u64 PS4_SYSV_ABI OcclusionEndHook(u64 ctx, u64 address, u64, u64, u64, u64, u64)
     if (!On() || !Stream::Ready() || address == 0) {
         return 0;
     }
-    Stream::DeferQuery(-1, [address](vk::CommandBuffer cmd) { Stream::QueryEnd(cmd, address); });
+    Stream::DeferQuery(-1, address, [address](vk::CommandBuffer cmd) { Stream::QueryEnd(cmd, address); });
     (void)ctx;
     return 0;
 }

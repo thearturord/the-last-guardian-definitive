@@ -50,7 +50,8 @@ struct Job {
     virtual void Prepare() {}
     Work work{Work::Other};
     bool locked{true};
-    s8 query{}; ///< R4a: +1 opens an occlusion query, -1 ends it (no submission is cut inside one)
+    s8 query{}; ///< R4a: +1 opens an occlusion query, -1 ends it (our splits never cut a submission inside one; an engine submit inside one carries it on, D4-10)
+    u64 query_address{}; ///< D4-10: the query's block (for the continuation in the next submission)
     u32 weight{1}; ///< G2: the jobs it stands for in the submission split (a batch: its draws)
     bool splice{false}; ///< P1 (parallel passes): a Splice placeholder (the resolver waits for its jobs and handles them in its place)
     std::vector<Transition> transitions;
@@ -190,10 +191,11 @@ void DeferPrepared(Work work, P&& prepare, F&& f) {
 }
 /// R4a: a job that begins (+1) or ends (-1) an occlusion query
 template <class F>
-void DeferQuery(s8 query, F&& f) {
+void DeferQuery(s8 query, u64 address, F&& f) {
     auto job = std::make_unique<FnJob<std::decay_t<F>>>(std::decay_t<F>(std::forward<F>(f)));
     job->work = Work::Other;
     job->query = query;
+    job->query_address = address;
     Enqueue(std::move(job));
 }
 template <class F>
@@ -223,7 +225,9 @@ void NewFrame();
 /// valid). Begin / End run in jobs (lock held, outside a pass): a Vulkan occlusion query counts the draws in between, in one command buffer (no split while it is open;
 /// a submit in between ends it there). The answer (seen or not) is written into the block once the GPU has finished; a block never answered reads "visible".
 void FirstAnswer(u64 address, u32 pairs);
-void QueryBegin(vk::CommandBuffer cmd, u64 address);
+void QueryBegin(vk::CommandBuffer cmd, u64 address, bool chained = false);
+/// D4-10: ends this recording's open query at a submission's end; its interval goes on in a chained QueryBegin in the next submission
+void QueryCut(vk::CommandBuffer cmd);
 void QueryEnd(vk::CommandBuffer cmd, u64 address);
 /// Writes the answers of the queries the GPU has finished (the recording thread, at a submit)
 void PollQueries();
