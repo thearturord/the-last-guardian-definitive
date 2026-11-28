@@ -77,4 +77,8 @@ void NoteWriteFaultTime(VAddr address, u64 nanoseconds);
 /// line goes to the log, and the counters are saved at once to user/log/rare_<kind>_counters.json (the first time). Any thread, cheap when nothing happens.
 namespace Core::RareEvents {
 void Note(const std::string& kind, const std::string& detail);
+/// Open items (documents/tlg/native plan/engine/open-items.md: paths the backend does not follow, never reached in the tested scenes). When one fires, the first
+/// five hits of each item go to user/log/open_items_hits.txt with the time and the mission scene the game was in (from the Lua "mission" marker), and it is also
+/// noted as the rare event "open_item_<id>". Any thread, cheap after the fifth hit (a counter).
+void OpenItem(const std::string& id, const std::string& detail);
 }

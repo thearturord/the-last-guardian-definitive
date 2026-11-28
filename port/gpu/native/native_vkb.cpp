@@ -706,6 +706,10 @@ u64 PS4_SYSV_ABI OcclusionBeginHook(u64 ctx, u64 address, u64, u64, u64, u64, u6
         return 0;
     }
     static const u32 pairs = Libraries::Kernel::sceKernelIsNeoMode() ? 16 : 8;
+    if (!OverlapOn()) {
+        // open item D4-09: the answers are polled only on the overlap path (native_vkb.cpp, Submit); with TLG_VKB_OVERLAP=0 a block keeps "visible"
+        Core::RareEvents::OpenItem("D4-09", fmt::format("an occlusion query (block {:#x}) with TLG_VKB_OVERLAP=0: no measured answer", address));
+    }
     Stream::FirstAnswer(address, pairs);
     Stream::DeferQuery(1, [address](vk::CommandBuffer cmd) { Stream::QueryBegin(cmd, address); });
     (void)ctx;

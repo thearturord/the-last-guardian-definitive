@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "native/native_vkb_objects.h"
+#include "native/native_debug_server.h" // RareEvents::OpenItem
 #include "native/native_flight.h"
 #include "native/native_timeline.h"
 #include "native/native_framewalk.h"
@@ -1268,6 +1269,9 @@ u64 SubmitLocked() {
             }
             t_rec->query_open = false;
             c_q_cut_by_submit.fetch_add(1, std::memory_order_relaxed);
+            // open item D4-10: the engine's query interval goes on past this submit; our Vulkan query counts only what this command buffer drew
+            Core::RareEvents::OpenItem("D4-10", fmt::format("an explicit submit inside an occlusion query (block {:#x}): the query ended at the submit",
+                                                            t_rec->query_open_address));
         }
         if (t_rec->stamping && !t_rec->segments.empty()) {
             (void)StampLocked(t_rec->current); // closes the last segment

@@ -155,13 +155,14 @@ inline std::atomic<std::uint64_t> download_compared_bytes{0}, download_changed_b
 inline std::atomic<std::uint64_t> scene_epoch{0};
 inline std::mutex scene_label_mutex;
 inline std::string scene_label{"(boot)"};
+/// The label is kept always (once per scene change): the open items log names the scene a hit came from (native_debug_server.cpp, RareEvents::OpenItem).
 inline void SetScene(std::string_view label) {
-    if (!write_attrib) {
-        return;
-    }
     {
         std::scoped_lock lock{scene_label_mutex};
         scene_label.assign(label);
+    }
+    if (!write_attrib) {
+        return;
     }
     scene_epoch.fetch_add(1, std::memory_order_release);
 }

@@ -204,19 +204,22 @@
     {
       "name": "LG1_SetPredication",
       "ghidra": "0x247e4a0",
-      "mode": "count",
+      "mode": "call",
+      "handler": "open_item_predication",
       "expect": "554889e541574156"
     },
     {
       "name": "LG1_BeginPredication",
       "ghidra": "0x2481610",
-      "mode": "count",
+      "mode": "call",
+      "handler": "open_item_predication",
       "expect": "554889e541574156"
     },
     {
       "name": "LG1_EndPredication",
       "ghidra": "0x24816b0",
-      "mode": "count",
+      "mode": "call",
+      "handler": "open_item_predication",
       "expect": "554889e553504889"
     },
     {
@@ -253,6 +256,13 @@
       "name": "LG7_BeginDispatchDraw",
       "ghidra": "0x249ec50",
       "mode": "count",
+      "expect": "554889e541574156"
+    },
+    {
+      "name": "OpenItem_FurResults",
+      "ghidra": "0x1e64c90",
+      "mode": "call",
+      "handler": "open_item_fur_results",
       "expect": "554889e541574156"
     },
     {

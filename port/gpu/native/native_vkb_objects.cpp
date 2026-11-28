@@ -2880,6 +2880,13 @@ bool CopyTexture(u64 destination_id, u32 destination_sub, u64 source_id, u32 sou
     const bool layers_ok = (to.type == vk::ImageType::e3D || to_layer < to.layers) && (from.type == vk::ImageType::e3D || from_layer < from.layers);
     if (to.is_depth != from.is_depth || to.type != from.type || to_mip >= to.mips || from_mip >= from.mips || !layers_ok || a != b || to.image == from.image) {
         c_tex_copy_mismatch.fetch_add(1, std::memory_order_relaxed);
+        if (a != b && to.is_depth == from.is_depth && to.type == from.type && to_mip < to.mips && from_mip < from.mips && layers_ok && to.image != from.image) {
+            // open item D4-11: the engine copies the source extent; we refuse a copy between unequal sizes
+            const std::string detail = fmt::format("CopyResource subresource {} -> {}: {}x{}x{} {} -> {}x{}x{} {}, refused (the engine copies the source extent)", source_sub,
+                                                   destination_sub, b.width, b.height, b.depth, vk::to_string(from.format), a.width, a.height, a.depth, vk::to_string(to.format));
+            lock.unlock();
+            Core::RareEvents::OpenItem("D4-11", detail);
+        }
         return false;
     }
     // a depth copy carries the stencil plane too where both images have one (api-contract review A4: ExCsDepthCopy, 0248e800, dispatches one raw copy over the
@@ -3089,6 +3096,14 @@ nlohmann::json UploadCensusReport() {
     nlohmann::json pages = {{"big_unmaps", c_pc_unmaps.load()}, {"pages_per_unmap", c_pc_pages.load() / un}, {"changed_pages_per_unmap", c_pc_changed.load() / un},
                             {"first_changed_page_mean", c_pc_first_changed_sum.load() / un}, {"last_changed_page_mean", c_pc_last_changed_sum.load() / un}};
     return {{"big_buffer_pages", pages}, {"buffers", v.size()}, {"mb", total >> 20}, {"copied_mb", copied >> 20}, {"unmap_mb", kinds[0] >> 20}, {"update_mb", kinds[1] >> 20}, {"other_mb", kinds[2] >> 20}, {"top", top}};
+}
+bool BufferHasDeviceCopy(u64 address, u64 size) {
+    if (!On() || !device_ready || address == 0 || size == 0 || DeviceBuffersMode() != 2) {
+        return false;
+    }
+    std::scoped_lock lock{mutex};
+    const Watched* w = WatchedAt(address, size);
+    return w != nullptr && w->state == Watched::State::Device;
 }
 void BufferCpuWritten(u64 address, u64 size) {
     R3dTrace("UpdateSubresource", address, size);
@@ -3608,6 +3623,9 @@ void StagingCopied(u64 texture_id, u32 sub) {
         const auto i = images.find(texture_id);
         if (i == images.end() || i->second.is_depth) {
             c_staging_unhandled.fetch_add(1, std::memory_order_relaxed);
+            // open item D4-13 (staging readback not handled)
+            Core::RareEvents::OpenItem("D4-13", fmt::format("staging copy of texture {:#x} sub {} not handled: {}", texture_id, sub,
+                                                            i == images.end() ? "no image of ours" : "a depth image"));
             return;
         }
         const Image& img = i->second;
@@ -3622,6 +3640,9 @@ void StagingCopied(u64 texture_id, u32 sub) {
     const u32 texel = TexelBytes(format);
     if (texel == 0) {
         c_staging_unhandled.fetch_add(1, std::memory_order_relaxed);
+        // open item D4-13: the staging readback of a block-compressed (or other format with no texel size) texture is not handled
+        Core::RareEvents::OpenItem("D4-13", fmt::format("staging copy of texture {:#x} sub {} ({}x{}, {}) not handled: no texel size (block-compressed?)", texture_id, sub,
+                                                        width, height, vk::to_string(format)));
         return;
     }
     VkBuffer buffer{};
@@ -3656,6 +3677,7 @@ void StagingCopied(u64 texture_id, u32 sub) {
             if (vmaCreateBuffer(instance->GetAllocator(), &ci, &alloc, &slot.buffer, &slot.allocation, &info) != VK_SUCCESS) {
                 slot = {};
                 c_staging_unhandled.fetch_add(1, std::memory_order_relaxed);
+                Core::RareEvents::OpenItem("D4-13", fmt::format("staging copy of texture {:#x} sub {}: its host buffer could not be made", texture_id, sub));
                 return;
             }
             slot.mapped = info.pMappedData;
@@ -3855,7 +3877,10 @@ vk::Sampler SamplerForLookup(u64 object, u64 id, u64 key, bool compare, s32 bias
     if (result != vk::Result::eSuccess) {
         return {};
     }
-    c_samplers_made.fetch_add(1, std::memory_order_relaxed);
+    // open item D4-06: samplers are never retired from this cache when the engine deletes them (about 40 in a run, all at load); a growing count means they churn
+    if (const u64 made = c_samplers_made.fetch_add(1, std::memory_order_relaxed) + 1; made >= 1024 && (made & (made - 1)) == 0) {
+        Core::RareEvents::OpenItem("D4-06", fmt::format("{} samplers made and none retired (normal: about 40, all at load)", made));
+    }
     samplers.emplace(key, sampler);
     return sampler;
 }

@@ -129,6 +129,9 @@ BufferWindow SourceWindow(u64 address, u64 size);
 void NoteBind(u32 kind, const BufferWindow& w, u64 size, bool written);
 /// The CPU wrote [address, address + size) of an engine buffer (UpdateSubresource): when it is ours in device memory the bytes are copied in, in the frame stream's order
 void BufferCpuWritten(u64 address, u64 size);
+/// True when [address, address + size) lies in a buffer we draw from our own device copy (R3d / V4e, mode 2): a CPU write into its memory with no API call
+/// (the fur results, open item N94b) would not reach the GPU.
+[[nodiscard]] bool BufferHasDeviceCopy(u64 address, u64 size);
 /// census: the caller of the next BufferCpuWritten (0 Unmap, 1 UpdateSubresource, 2 other)
 void SetCpuWriteKind(u32 kind);
 nlohmann::json UploadCensusReport();

@@ -10177,6 +10177,60 @@ u64 PS4_SYSV_ABI K2RegisterB(u64 table_base, u64 group, u64 a2, u64 a3, u64 a4, 
     }
     return 0;
 }
+/// Open item Q1 (LG1 sentinels, open-items.md): SetPredication 0247e4a0 / BeginPredication 02481610 / EndPredication 024816b0 are not followed: a predicated draw
+/// or dispatch always runs. Any call is logged with its caller and the scene (user/log/open_items_hits.txt).
+u64 PS4_SYSV_ABI OpenItemPredication(u64 a0, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 ret) {
+    (void)a2, (void)a3, (void)a4, (void)a5;
+    Guarded([&]() -> u64 {
+        Core::RareEvents::OpenItem("Q1", fmt::format("predication call from {:#x} (args {:#x} {:#x}): predicated draws are always drawn", ret - ImageBase() + 0x1000000, a0, a1));
+        return 0;
+    });
+    return 0;
+}
+/// Open item N94b: at Fur_MapReadGpuResults (01e64c90, rdi = the fur object): the fur code writes its results with plain stores into two buffers' memory, the
+/// object's + 0x470 / + 0x480 (Fur_ApplyGpuResults 015b0f70) and [+ 0x38] + 0x2c0 / + 0x2c8 (this function's memcpy). If we draw one of them from our own device
+/// copy, those writes never reach the GPU (stale fur). Logged per buffer once it is seen with a device copy.
+u64 PS4_SYSV_ABI OpenItemFurResults(u64 fur, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5, u64 ret) {
+    (void)a1, (void)a2, (void)a3, (void)a4, (void)a5, (void)ret;
+    if (!IsHeapPointer(fur)) {
+        return 0;
+    }
+    Guarded([&]() -> u64 {
+        const auto memory_of = [](u64 b) -> u64 {
+            const bool own = Rd<u64>(b, 0x38) == 0 || Rd<u32>(b, 0x40) - 1u < 2u;
+            const u64 cell = own ? b + 0x50 : Rd<u64>(Rd<u64>(b, 0x38), 0x20) + 0x30;
+            return IsHeapPointer(cell) ? Rd<u64>(cell, 0) : 0;
+        };
+        const u64 owner = Rd<u64>(fur, 0x38);
+        const std::array<std::pair<const char*, u64>, 4> buffers{{{"+0x470 (Fur_ApplyGpuResults)", Rd<u64>(fur, 0x470)},
+                                                                  {"+0x480 (Fur_ApplyGpuResults)", Rd<u64>(fur, 0x480)},
+                                                                  {"[+0x38]+0x2c0 (Fur_MapReadGpuResults)", IsHeapPointer(owner) ? Rd<u64>(owner, 0x2c0) : 0},
+                                                                  {"[+0x38]+0x2c8 (Fur_MapReadGpuResults)", IsHeapPointer(owner) ? Rd<u64>(owner, 0x2c8) : 0}}};
+        static std::mutex m;
+        static std::set<u64> logged;
+        for (const auto& [what, b] : buffers) {
+            if (!IsHeapPointer(b)) {
+                continue;
+            }
+            const u64 memory = memory_of(b);
+            const u64 size = std::max<u64>(Rd<u32>(b, 0x58), 16);
+            if (memory == 0 || !Core::Vkb::BufferHasDeviceCopy(memory, size)) {
+                continue;
+            }
+            {
+                std::scoped_lock lock{m};
+                if (!logged.insert(b).second) {
+                    continue;
+                }
+            }
+            Core::RareEvents::OpenItem("N94b", fmt::format("fur object {:#x}: buffer {} {:#x} (memory {:#x}, {} bytes) is drawn from our device copy; the fur code's plain writes "
+                                                           "into its memory do not reach the GPU",
+                                                           fur, what, b, memory, size));
+        }
+        return 0;
+    });
+    return 0;
+}
 /// Table A (FrameData_AddReadbackGroupA 01ce5a10, base = frame data + 0x31e30 like B and C): census only (debug, TLG_K2_CENSUS=1), no lock-list learning
 /// (static race pass 2026-11-28, suspect 1: table A was never counted)
 u64 PS4_SYSV_ABI K2RegisterA(u64 table_base, u64 group, u64 a2, u64 a3, u64 a4, u64 a5, u64 ret) {
@@ -12867,6 +12921,12 @@ u64 FindHandler(const std::string& name) {
     }
     if (name == "note_c_gbuf_variant") {
         return reinterpret_cast<u64>(&NoteCGbufVariant);
+    }
+    if (name == "open_item_predication") {
+        return reinterpret_cast<u64>(&OpenItemPredication);
+    }
+    if (name == "open_item_fur_results") {
+        return reinterpret_cast<u64>(&OpenItemFurResults);
     }
     if (name == "k2_register_a") {
         return reinterpret_cast<u64>(&K2RegisterA);

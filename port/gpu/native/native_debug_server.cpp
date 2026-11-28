@@ -12,8 +12,11 @@
 #include <mutex>
 #include <thread>
 #include <vector>
+#include <ctime>
+#include <map>
 #include <fmt/format.h>
 #include <httplib.h>
+#include "tlg_toggles.h" // TlgStats::SceneLabel (the open items' scene)
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "common/memory_patcher.h"
@@ -925,13 +928,17 @@ void Start(u16 port) {
                     periodic_snapshot_valid = true;
                 }
             };
-            const bool self_test = std::getenv("TLG_RARE_EVENT_TEST") != nullptr; // development: one made up event after 3 s, to see the file and the snapshot
+            // development: one made up rare event and open item after TLG_RARE_EVENT_TEST seconds (a number; 3 otherwise), to see the files and the snapshot
+            const char* self_test_env = std::getenv("TLG_RARE_EVENT_TEST");
+            const bool self_test = self_test_env != nullptr;
+            const u32 self_test_ticks = self_test && std::atoi(self_test_env) > 0 ? static_cast<u32>(std::atoi(self_test_env)) * 10u : 30u;
             u32 ticks = 0;
             while (!stop.stop_requested()) {
                 for (int i = 0; i < 200 && !stop.stop_requested(); ++i) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                    if (self_test && ++ticks == 30) {
+                    if (self_test && ++ticks == self_test_ticks) {
                         Core::RareEvents::Note("self_test", "made up by TLG_RARE_EVENT_TEST");
+                        Core::RareEvents::OpenItem("self_test", "made up by TLG_RARE_EVENT_TEST");
                     }
                     if (snapshot_now.exchange(false)) {
                         std::string kind;
@@ -999,6 +1006,30 @@ void Note(const std::string& kind, const std::string& detail) {
     if (n == 1) {
         DebugServer::snapshot_now.store(true);
     }
+}
+
+void OpenItem(const std::string& id, const std::string& detail) {
+    static std::mutex m;
+    static std::map<std::string, u64> counts;
+    u64 n;
+    {
+        std::scoped_lock lk{m};
+        n = ++counts[id];
+    }
+    if (n <= 5) {
+        const auto now = std::chrono::system_clock::now();
+        const std::time_t t = std::chrono::system_clock::to_time_t(now);
+        std::tm local{};
+        localtime_s(&local, &t);
+        char when[32]{};
+        std::strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", &local);
+        const auto line = fmt::format("[{}] uptime {:.1f} s, scene \"{}\", open item {} hit #{}: {}\n", when, DebugServer::UptimeMs() / 1000.0, TlgStats::SceneLabel(), id, n,
+                                      detail);
+        std::scoped_lock lk{m};
+        std::ofstream file{Common::FS::GetUserPath(Common::FS::PathType::LogDir) / "open_items_hits.txt", std::ios::app | std::ios::binary};
+        file << line;
+    }
+    Note("open_item_" + id, detail);
 }
 
 } // namespace Core::RareEvents
