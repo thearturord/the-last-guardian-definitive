@@ -995,8 +995,14 @@ void Note(const std::string& kind, const std::string& detail) {
     if (n > 5) {
         return; // counted, not written again
     }
-    const auto unix_s = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-    const auto line = fmt::format("[{}] uptime {:.1f} s, {} #{}: {}\n", unix_s, DebugServer::UptimeMs() / 1000.0, kind, n, detail);
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t t = std::chrono::system_clock::to_time_t(now);
+    std::tm local{};
+    localtime_s(&local, &t);
+    char when[32]{};
+    std::strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", &local);
+    // the mission scene the game is in (the Lua "mission" marker): where in the game the event came up
+    const auto line = fmt::format("[{}] uptime {:.1f} s, scene \"{}\", {} #{}: {}\n", when, DebugServer::UptimeMs() / 1000.0, TlgStats::SceneLabel(), kind, n, detail);
     {
         std::scoped_lock lk{DebugServer::rare_mutex};
         std::ofstream file{Common::FS::GetUserPath(Common::FS::PathType::LogDir) / "rare_events.txt", std::ios::app | std::ios::binary};
@@ -1009,26 +1015,6 @@ void Note(const std::string& kind, const std::string& detail) {
 }
 
 void OpenItem(const std::string& id, const std::string& detail) {
-    static std::mutex m;
-    static std::map<std::string, u64> counts;
-    u64 n;
-    {
-        std::scoped_lock lk{m};
-        n = ++counts[id];
-    }
-    if (n <= 5) {
-        const auto now = std::chrono::system_clock::now();
-        const std::time_t t = std::chrono::system_clock::to_time_t(now);
-        std::tm local{};
-        localtime_s(&local, &t);
-        char when[32]{};
-        std::strftime(when, sizeof(when), "%Y-%m-%d %H:%M:%S", &local);
-        const auto line = fmt::format("[{}] uptime {:.1f} s, scene \"{}\", open item {} hit #{}: {}\n", when, DebugServer::UptimeMs() / 1000.0, TlgStats::SceneLabel(), id, n,
-                                      detail);
-        std::scoped_lock lk{m};
-        std::ofstream file{Common::FS::GetUserPath(Common::FS::PathType::LogDir) / "open_items_hits.txt", std::ios::app | std::ios::binary};
-        file << line;
-    }
     Note("open_item_" + id, detail);
 }
 
